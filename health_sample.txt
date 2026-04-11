@@ -1,0 +1,20 @@
+Title:	health_20_0_1_10							
+Parameters:								
+								
+DAQ	Settings:							
+Frequency	Limit	2000						
+Spectral	Lines	1600						
+Number	of	Blocks	1024					
+Total	Data	Rows	4194304					
+Channels:								
+Legend	Channel1	Channel2	Channel3	Channel4	Channel5	Channel6	Channel7	Channel8
+								
+On/Off	ON	ON	ON	ON	ON	ON	ON	ON
+								
+Volts/Unit	1	1	1	1	1	1	1	1
+								
+Data								
+-2.620149	-0.428346	-0.458107	-0.159421	0.003721	-0.019262	-0.420282	-0.749513	
+-2.62315	-0.430026	-0.449544	-0.151982	0.002871	-0.008988	-0.419195	-0.722474	
+-2.620016	-0.42928	-0.454772	-0.156611	0.002692	-0.018853	-0.427588	-0.754347	
+-2.618047	-0.430491	-0.458454	-0.155162	0.001884	0.003046	-0.428878	-0.741094	

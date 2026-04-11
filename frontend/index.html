@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PersonalizedFL 模型调用</title>
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f8f9fa;
+        }
+        .container {
+            max-width: 1200px;
+            margin-top: 30px;
+        }
+        .card {
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #007bff;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .result-card {
+            margin-top: 20px;
+        }
+        .result-header {
+            background-color: #e3f2fd;
+            padding: 15px;
+            border-radius: 5px 5px 0 0;
+        }
+        .result-body {
+            padding: 20px;
+        }
+        .summary-container {
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            padding: 15px;
+            border: 1px solid #e9ecef;
+        }
+        .summary-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #e9ecef;
+        }
+        .summary-item:last-child {
+            margin-bottom: 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+        .summary-item .label {
+            font-weight: 500;
+            color: #495057;
+        }
+        .summary-item .value {
+            font-weight: 600;
+            color: #007bff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-5">PersonalizedFL 模型调用</h1>
+        
+        <div class="card">
+            <div class="card-header">
+                <h5>参数设置</h5>
+            </div>
+            <div class="card-body">
+                <form id="modelForm">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label for="algorithm">算法选择</label>
+                                <select class="form-control" id="algorithm" name="algorithm">
+                                    <option value="fedavg">FedAvg</option>
+                                    <option value="fedprox">FedProx</option>
+                                    <option value="fedbn">FedBN</option>
+                                    <option value="fedap">FedAP</option>
+                                    <option value="metafed">MetaFed</option>
+                                    <option value="base">Base</option>
+                                </select>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="dataset">数据集选择</label>
+                                <select class="form-control" id="dataset" name="dataset">
+                                    <option value="medmnist">MedMNIST</option>
+                                    <option value="pacs">PACS</option>
+                                    <option value="vlcs">VLCS</option>
+                                    <option value="officehome">Office-Home</option>
+                                    <option value="pamap">PAMAP2</option>
+                                    <option value="covid">COVID</option>
+                                    <option value="cwru">CWRU 轴承</option>
+                                    <option value="seu">SEU 故障</option>
+                                </select>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="non_iid_alpha">非独立同分布程度 (alpha)</label>
+                                <input type="number" class="form-control" id="non_iid_alpha" name="non_iid_alpha" value="0.1" step="0.01">
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label for="iters">通信轮数</label>
+                                <input type="number" class="form-control" id="iters" name="iters" value="300" min="1">
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="wk_iters">本地训练轮数</label>
+                                <input type="number" class="form-control" id="wk_iters" name="wk_iters" value="1" min="1">
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="n_clients">客户端数量</label>
+                                <input type="number" class="form-control" id="n_clients" name="n_clients" value="20" min="1">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group" id="fedproxParams" style="display: none;">
+                        <label for="mu">FedProx 正则化参数 (mu)</label>
+                        <input type="number" class="form-control" id="mu" name="mu" value="0.001" step="0.001">
+                    </div>
+                    
+                    <div class="form-group" id="fedapParams" style="display: none;">
+                        <label for="model_momentum">FedAP 动量参数</label>
+                        <input type="number" class="form-control" id="model_momentum" name="model_momentum" value="0.5" step="0.1">
+                    </div>
+                    
+                    <div class="form-group" id="metafedParams" style="display: none;">
+                        <label for="threshold">MetaFed 阈值参数</label>
+                        <input type="number" class="form-control" id="threshold" name="threshold" value="0.6" step="0.1">
+                    </div>
+                    
+                    <button type="button" class="btn btn-primary btn-block" id="runModel">运行模型</button>
+                </form>
+            </div>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>模型运行中，请稍候...</p>
+            <div class="progress mt-3" style="width: 80%; margin: 0 auto;">
+                <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                     id="progressBar" 
+                     role="progressbar" 
+                     style="width: 0%">
+                    0%
+                </div>
+            </div>
+            <p class="mt-2" id="progressText">训练进度: 0% (第 0/300 轮)</p>
+            <button type="button" class="btn btn-danger mt-2" id="cancelTraining" style="display: none;">取消训练</button>
+        </div>
+        
+        <div class="card result-card" id="resultCard" style="display: none;">
+            <div class="result-header">
+                <h5>模型运行结果</h5>
+            </div>
+            <div class="result-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <h6>基本信息</h6>
+                        <p><strong>算法:</strong> <span id="resultAlgorithm"></span></p>
+                        <p><strong>数据集:</strong> <span id="resultDataset"></span></p>
+                        <p><strong>非独立同分布程度:</strong> <span id="resultAlpha"></span></p>
+                        <p><strong>平均准确率:</strong> <span id="resultAverageAcc"></span></p>
+                        <p><strong>训练时长:</strong> <span id="resultTrainingTime"></span></p>
+                    </div>
+                    <div class="col-md-6">
+                        <h6>准确率摘要</h6>
+                        <div id="accuracySummary" class="summary-container">
+                            <!-- 准确率摘要将通过JavaScript动态生成 -->
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <h6>准确率分布</h6>
+                    <div class="chart-container" style="height: 250px;">
+                        <canvas id="accuracyChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card" id="historyCard">
+            <div class="card-header">
+                <h5>历史训练记录 <button type="button" class="btn btn-sm btn-primary float-right" id="refreshHistory">刷新</button></h5>
+            </div>
+            <div class="card-body">
+                <div id="historyTable" class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead>
+                            <tr>
+                                <th>时间</th>
+                                <th>算法</th>
+                                <th>数据集</th>
+                                <th>客户端数</th>
+                                <th>通信轮数</th>
+                                <th>非IID程度</th>
+                                <th>算法参数</th>
+                                <th>平均准确率</th>
+                                <th>精确率</th>
+                                <th>召回率</th>
+                                <th>F1分数</th>
+                                <th>训练时长</th>
+                                <th>内存使用(MB)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyBody">
+                            <tr>
+                                <td colspan="7" class="text-center">加载历史记录中...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let activeFetchController = null;
+        let trainingRunning = false;
+
+        function setTrainingState(isRunning) {
+            trainingRunning = isRunning;
+            document.getElementById('runModel').disabled = isRunning;
+            document.getElementById('cancelTraining').style.display = isRunning ? 'inline-block' : 'none';
+            document.getElementById('cancelTraining').disabled = false;
+            document.getElementById('cancelTraining').textContent = '取消训练';
+        }
+
+        // 算法参数显示控制
+        document.getElementById('algorithm').addEventListener('change', function() {
+            const algorithm = this.value;
+            
+            // 隐藏所有参数面板
+            document.getElementById('fedproxParams').style.display = 'none';
+            document.getElementById('fedapParams').style.display = 'none';
+            document.getElementById('metafedParams').style.display = 'none';
+            
+            // 显示对应算法的参数面板
+            if (algorithm === 'fedprox') {
+                document.getElementById('fedproxParams').style.display = 'block';
+            } else if (algorithm === 'fedap') {
+                document.getElementById('fedapParams').style.display = 'block';
+            } else if (algorithm === 'metafed') {
+                document.getElementById('metafedParams').style.display = 'block';
+            }
+        });
+        
+        // 运行模型按钮点击事件
+        document.getElementById('runModel').addEventListener('click', function() {
+            if (trainingRunning) {
+                return;
+            }
+
+            // 显示加载状态
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('resultCard').style.display = 'none';
+            setTrainingState(true);
+            
+            // 重置进度条
+            document.getElementById('progressBar').style.width = '0%';
+            document.getElementById('progressBar').textContent = '0%';
+            document.getElementById('progressText').textContent = '训练进度: 0% (第 0/' + document.getElementById('iters').value + ' 轮)';
+            
+            // 收集表单数据
+            const formData = {
+                alg: document.getElementById('algorithm').value,
+                dataset: document.getElementById('dataset').value,
+                iters: parseInt(document.getElementById('iters').value),
+                wk_iters: parseInt(document.getElementById('wk_iters').value),
+                non_iid_alpha: parseFloat(document.getElementById('non_iid_alpha').value),
+                n_clients: parseInt(document.getElementById('n_clients').value),
+                mu: parseFloat(document.getElementById('mu').value),
+                model_momentum: parseFloat(document.getElementById('model_momentum').value),
+                threshold: parseFloat(document.getElementById('threshold').value)
+            };
+            
+            // 由于 EventSource 不支持 POST 请求，改用 fetch 配合 ReadableStream
+            activeFetchController = new AbortController();
+            fetch('http://localhost:5001/api/run-model', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(formData),
+                signal: activeFetchController.signal
+            })
+            .then(response => {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                
+                function readStream() {
+                    return reader.read().then(({ done, value }) => {
+                        if (done) {
+                            activeFetchController = null;
+                            if (trainingRunning) {
+                                document.getElementById('loading').style.display = 'none';
+                                setTrainingState(false);
+                            }
+                            return;
+                        }
+                        
+                        const chunk = decoder.decode(value, { stream: true });
+                        const lines = chunk.split('\n\n');
+                        
+                        lines.forEach(line => {
+                            if (line.startsWith('data: ')) {
+                                try {
+                                    const data = JSON.parse(line.substring(6));
+                                    
+                                    if (data.type === 'progress') {
+                                        // 更新进度条
+                                        document.getElementById('progressBar').style.width = data.progress + '%';
+                                        document.getElementById('progressBar').textContent = data.progress + '%';
+                                        document.getElementById('progressText').textContent = data.message;
+                                    } else if (data.type === 'result') {
+                                        // 隐藏加载状态
+                                        document.getElementById('loading').style.display = 'none';
+                                        setTrainingState(false);
+                                        activeFetchController = null;
+                                        
+                                        // 显示结果
+                                        document.getElementById('resultCard').style.display = 'block';
+                                        document.getElementById('resultAlgorithm').textContent = data.algorithm;
+                                        document.getElementById('resultDataset').textContent = data.dataset;
+                                        document.getElementById('resultAlpha').textContent = data.non_iid_alpha;
+                                        document.getElementById('resultAverageAcc').textContent = (data.average_accuracy * 100).toFixed(2) + '%';
+                                        document.getElementById('resultTrainingTime').textContent = data.training_time;
+                                        
+                                        // 生成准确率分布图
+                                        const ctx = document.getElementById('accuracyChart').getContext('2d');
+                                        if (window.accuracyChart && typeof window.accuracyChart.destroy === 'function') {
+                                            window.accuracyChart.destroy();
+                                        }
+                                        
+                                        // 优化图表显示，当客户端数量较多时使用更紧凑的布局
+                                        const chartOptions = {
+                                            responsive: true,
+                                            maintainAspectRatio: false,
+                                            plugins: {
+                                                legend: {
+                                                    display: false
+                                                },
+                                                tooltip: {
+                                                    callbacks: {
+                                                        label: function(context) {
+                                                            return `准确率: ${context.parsed.y.toFixed(2)}%`;
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            scales: {
+                                                y: {
+                                                    beginAtZero: true,
+                                                    max: 100,
+                                                    title: {
+                                                        display: true,
+                                                        text: '准确率 (%)'
+                                                    },
+                                                    ticks: {
+                                                        maxTicksLimit: 6
+                                                    }
+                                                },
+                                                x: {
+                                                    ticks: {
+                                                        maxRotation: 45,
+                                                        minRotation: 45,
+                                                        maxTicksLimit: 10
+                                                    }
+                                                }
+                                            }
+                                        };
+                                        
+                                        // 当客户端数量超过10个时，使用更紧凑的标签
+                                        const labels = data.test_accuracies.map((_, index) => {
+                                            if (data.test_accuracies.length > 10) {
+                                                return `Client ${index + 1}`;
+                                            } else {
+                                                return `客户端 ${index + 1}`;
+                                            }
+                                        });
+                                        
+                                        window.accuracyChart = new Chart(ctx, {
+                                            type: 'bar',
+                                            data: {
+                                                labels: labels,
+                                                datasets: [{
+                                                    label: '准确率',
+                                                    data: data.test_accuracies.map(acc => acc * 100),
+                                                    backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                                                    borderColor: 'rgba(75, 192, 192, 1)',
+                                                    borderWidth: 1
+                                                }]
+                                            },
+                                            options: chartOptions
+                                        });
+                                        
+                                        // 显示客户端准确率摘要
+                                        const accuracySummary = document.getElementById('accuracySummary');
+                                        accuracySummary.innerHTML = `
+                                            <div class="summary-item">
+                                                <span class="label">最高准确率:</span>
+                                                <span class="value">${(Math.max(...data.test_accuracies) * 100).toFixed(2)}%</span>
+                                            </div>
+                                            <div class="summary-item">
+                                                <span class="label">最低准确率:</span>
+                                                <span class="value">${(Math.min(...data.test_accuracies) * 100).toFixed(2)}%</span>
+                                            </div>
+                                            <div class="summary-item">
+                                                <span class="label">准确率标准差:</span>
+                                                <span class="value">${Math.sqrt(data.test_accuracies.reduce((sum, acc) => sum + Math.pow(acc - data.average_accuracy, 2), 0) / data.test_accuracies.length).toFixed(4)}</span>
+                                            </div>
+                                        `;
+                                    } else if (data.type === 'cancelled') {
+                                        document.getElementById('loading').style.display = 'none';
+                                        setTrainingState(false);
+                                        activeFetchController = null;
+                                        alert(data.message || '训练已取消');
+                                    } else if (data.type === 'error') {
+                                        // 隐藏加载状态
+                                        document.getElementById('loading').style.display = 'none';
+                                        setTrainingState(false);
+                                        activeFetchController = null;
+                                        alert('错误: ' + data.error);
+                                    }
+                                } catch (e) {
+                                    console.error('解析数据失败:', e);
+                                }
+                            }
+                        });
+                        
+                        return readStream();
+                    });
+                }
+                
+                return readStream();
+            })
+            .catch(error => {
+                document.getElementById('loading').style.display = 'none';
+                setTrainingState(false);
+                activeFetchController = null;
+                if (error.name === 'AbortError') {
+                    return;
+                }
+                alert('请求失败: ' + error.message);
+            });
+        });
+
+        document.getElementById('cancelTraining').addEventListener('click', function() {
+            if (!trainingRunning) {
+                return;
+            }
+
+            this.disabled = true;
+            this.textContent = '取消中...';
+
+            fetch('http://localhost:5001/api/cancel-training', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            })
+            .then(async response => {
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.message || '取消失败');
+                }
+                this.textContent = '等待训练停止...';
+            })
+            .catch(error => {
+                this.disabled = false;
+                this.textContent = '取消训练';
+                alert('取消失败: ' + error.message);
+            });
+        });
+        
+        // 初始化页面时触发一次算法参数显示
+        document.getElementById('algorithm').dispatchEvent(new Event('change'));
+        
+        // 加载历史训练记录
+        function loadHistory() {
+            fetch('http://localhost:5001/api/history')
+                .then(response => response.json())
+                .then(data => {
+                    const historyBody = document.getElementById('historyBody');
+                    historyBody.innerHTML = '';
+                    
+                    if (data.history && data.history.length > 0) {
+                        data.history.forEach(record => {
+                            const row = document.createElement('tr');
+                            
+                            // 算法参数显示
+                            let algoParam = '-';
+                            if (record.algorithm === 'metafed' && record.threshold) {
+                                algoParam = `threshold: ${record.threshold}`;
+                            } else if (record.algorithm === 'fedprox' && record.mu) {
+                                algoParam = `mu: ${record.mu}`;
+                            } else if (record.algorithm === 'fedap' && record.model_momentum) {
+                                algoParam = `momentum: ${record.model_momentum}`;
+                            }
+                            
+                            // 故障诊断指标显示
+                            const precision = record.precision ? (record.precision * 100).toFixed(2) + '%' : '-';
+                            const recall = record.recall ? (record.recall * 100).toFixed(2) + '%' : '-';
+                            const f1Score = record.f1_score ? (record.f1_score * 100).toFixed(2) + '%' : '-';
+                            
+                            row.innerHTML = `
+                                <td>${record.timestamp}</td>
+                                <td>${record.algorithm}</td>
+                                <td>${record.dataset}</td>
+                                <td>${record.n_clients}</td>
+                                <td>${record.iters}</td>
+                                <td>${record.non_iid_alpha}</td>
+                                <td>${algoParam}</td>
+                                <td>${(record.average_accuracy * 100).toFixed(2)}%</td>
+                                <td>${precision}</td>
+                                <td>${recall}</td>
+                                <td>${f1Score}</td>
+                                <td>${record.training_time}</td>
+                                <td>${record.memory_used || '-'}</td>
+                            `;
+                            historyBody.appendChild(row);
+                        });
+                    } else {
+                        const row = document.createElement('tr');
+                        row.innerHTML = '<td colspan="13" class="text-center">暂无历史训练记录</td>';
+                        historyBody.appendChild(row);
+                    }
+                })
+                .catch(error => {
+                    console.error('加载历史记录失败:', error);
+                    const historyBody = document.getElementById('historyBody');
+                    historyBody.innerHTML = '<tr><td colspan="7" class="text-center text-danger">加载历史记录失败</td></tr>';
+                });
+        }
+        
+        // 刷新历史记录
+        document.getElementById('refreshHistory').addEventListener('click', loadHistory);
+        
+        // 页面加载时自动加载历史记录
+        window.addEventListener('load', loadHistory);
+    </script>
+</body>
+</html>
