@@ -24,25 +24,83 @@ class metafed(torch.nn.Module):
         args.sort = args.sort[:-1]
         self.args = args
         self.csort = [int(item) for item in args.sort.split('-')]
+        self.teacher_models = None
+        self.teacher_snapshot_round = None
+        self.personalization_teacher_models = None
+
+    def _is_personalized_head_key(self, model, key):
+        if hasattr(model, 'classifier') and key.startswith('classifier.fc3.'):
+            return True
+        if hasattr(model, 'fc3') and key.startswith('fc3.'):
+            return True
+        if hasattr(model, 'fc2') and not hasattr(model, 'fc3') and key.startswith('fc2.'):
+            return True
+        return False
+
+    def _copy_teacher_weights(self, student_model, teacher_model):
+        if teacher_model is None:
+            return
+        with torch.no_grad():
+            for key in teacher_model.state_dict().keys():
+                if 'num_batches_tracked' in key:
+                    continue
+                if self.args.nosharebn and 'bn' in key:
+                    continue
+                if self._is_personalized_head_key(student_model, key):
+                    continue
+                student_model.state_dict()[key].data.copy_(
+                    teacher_model.state_dict()[key].data
+                )
+
+    def _refresh_teacher_models(self, round_idx):
+        if self.teacher_snapshot_round == round_idx and self.teacher_models is not None:
+            return
+        self.teacher_models = [
+            copy.deepcopy(model).to(self.args.device)
+            for model in self.client_model
+        ]
+        self.teacher_snapshot_round = round_idx
+
+    def _refresh_personalization_teacher_models(self):
+        if self.personalization_teacher_models is not None:
+            return
+        self.personalization_teacher_models = [
+            copy.deepcopy(model).to(self.args.device)
+            for model in self.client_model
+        ]
 
     def init_model_flag(self, train_loaders, val_loaders):
-        self.flagl = []
         client_num = self.args.n_clients
-        for _ in range(client_num):
-            self.flagl.append(False)
-        optimizers = [optim.SGD(params=self.client_model[idx].parameters(
-        ), lr=self.args.lr) for idx in range(client_num)]
+        self.flagl = [False for _ in range(client_num)]
+        self.teacher_models = None
+        self.teacher_snapshot_round = None
+        self.personalization_teacher_models = None
+        base_state = copy.deepcopy(self.server_model.state_dict())
         for idx in range(client_num):
-            client_idx = idx
-            model, train_loader, optimizer, tmodel, val_loader = self.client_model[
-                client_idx], train_loaders[client_idx], optimizers[client_idx], None, val_loaders[idx]
-            for _ in range(30):
-                _, _ = trainwithteacher(
-                    model, train_loader, optimizer, self.loss_fun, self.args.device, tmodel, 1, self.args, False)
-            _, val_acc, _, _, _ = test(model, val_loader,
-                              self.loss_fun, self.args.device)
-            if val_acc > self.args.threshold:
-                self.flagl[idx] = True
+            model = copy.deepcopy(self.server_model).to(self.args.device)
+            model.load_state_dict(base_state)
+            optimizer = optim.SGD(params=model.parameters(), lr=self.args.lr)
+            warmup_iters = max(1, self.args.wk_iters)
+            for _ in range(warmup_iters):
+                trainwithteacher(
+                    model,
+                    train_loaders[idx],
+                    optimizer,
+                    self.loss_fun,
+                    self.args.device,
+                    None,
+                    0,
+                    self.args,
+                    False
+                )
+            _, val_acc, _, _, _ = test(
+                model, val_loaders[idx], self.loss_fun, self.args.device
+            )
+            self.flagl[idx] = val_acc > self.args.threshold
+
+        for idx in range(client_num):
+            self.client_model[idx].load_state_dict(copy.deepcopy(base_state))
+
         if self.args.dataset in ['vlcs', 'pacs']:
             self.thes = 0.4
         elif 'medmnist' in self.args.dataset:
@@ -56,10 +114,10 @@ class metafed(torch.nn.Module):
         for client_idx, model in enumerate(self.client_model):
             _, val_acc, _, _, _ = test(
                 model, val_loaders[client_idx], self.loss_fun, self.args.device)
-            if val_acc > self.args.threshold:
-                self.flagl[client_idx] = True
+            self.flagl[client_idx] = val_acc > self.args.threshold
 
     def client_train(self, c_idx, dataloader, round):
+        self._refresh_teacher_models(round)
         # 确保c_idx不超出范围
         if c_idx >= len(self.csort):
             c_idx = c_idx % len(self.csort)
@@ -72,10 +130,12 @@ class metafed(torch.nn.Module):
             # 确保索引不越界
             tidx_idx = c_idx - 1 if c_idx > 0 else len(self.csort) - 1
             tidx = self.csort[tidx_idx]
-            tmodel = self.client_model[tidx]
-        
+            tmodel = self.teacher_models[tidx]
+
         model, train_loader, optimizer = self.client_model[
             client_idx], dataloader, self.optimizers[client_idx]
+        if tmodel is not None and not self.flagl[client_idx]:
+            self._copy_teacher_weights(model, tmodel)
         for _ in range(self.args.wk_iters):
             train_loss, train_acc = trainwithteacher(
                 model, train_loader, optimizer, self.loss_fun, self.args.device, tmodel, self.args.lam, self.args, self.flagl[client_idx])
@@ -83,8 +143,11 @@ class metafed(torch.nn.Module):
 
     def personalization(self, c_idx, dataloader, val_loader):
         client_idx = self.csort[c_idx]
+        self._refresh_personalization_teacher_models()
+        tidx_idx = c_idx - 1 if c_idx > 0 else len(self.csort) - 1
+        tidx = self.csort[tidx_idx]
         model, train_loader, optimizer, tmodel = self.client_model[
-            client_idx], dataloader, self.optimizers[client_idx], copy.deepcopy(self.client_model[self.csort[-1]])
+            client_idx], dataloader, self.optimizers[client_idx], self.personalization_teacher_models[tidx]
 
         with torch.no_grad():
             _, v1a, _, _, _ = test(model, val_loader, self.loss_fun, self.args.device)
@@ -95,9 +158,11 @@ class metafed(torch.nn.Module):
         else:
             lam = (10**(min(1, (v2a-v1a)*5)))/10*self.args.lam
 
+        if lam == 0:
+            tmodel = None
         for _ in range(self.args.wk_iters):
             train_loss, train_acc = trainwithteacher(
-                model, train_loader, optimizer, self.loss_fun, self.args.device, tmodel, lam, self.args, self.flagl[client_idx])
+                model, train_loader, optimizer, self.loss_fun, self.args.device, tmodel, lam, self.args, True)
         return train_loss, train_acc
 
     def client_eval(self, c_idx, dataloader):

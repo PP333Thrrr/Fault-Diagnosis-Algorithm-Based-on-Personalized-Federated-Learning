@@ -74,6 +74,29 @@ def is_cancel_requested(job_id):
         training_progress.get('cancel_requested', False)
     )
 
+
+def evaluate_client_accuracy_curve_point(algclass, test_loaders, round_index):
+    client_accuracies = []
+    for client_idx, test_loader in enumerate(test_loaders):
+        _, acc, _, _, _ = algclass.client_eval(client_idx, test_loader)
+        client_accuracies.append(float(acc))
+
+    return {
+        'round': int(round_index),
+        'client_accuracies': client_accuracies,
+        'average_accuracy': float(np.mean(client_accuracies)) if client_accuracies else 0.0
+    }
+
+
+def emit_accuracy_curve_point(algclass, test_loaders, round_index, accuracy_curve):
+    curve_point = evaluate_client_accuracy_curve_point(
+        algclass,
+        test_loaders,
+        round_index
+    )
+    accuracy_curve.append(curve_point)
+    return curve_point
+
 @app.route('/api/run-model', methods=['POST'])
 def run_model():
     """运行联邦学习模型并返回结果（带进度）"""
@@ -112,7 +135,17 @@ def run_model():
             args.save_path = data.get('save_path', '../cks/')
             args.device = data.get('device', 'cuda' if os.environ.get('CUDA_VISIBLE_DEVICES') else 'cpu')
             args.batch = data.get('batch', 32)
-            args.lr = data.get('lr', 0.01)
+            args.lr = data.get('lr')
+            if args.lr is None:
+                default_lrs = {
+                    'base': 0.01,
+                    'fedavg': 0.01,
+                    'fedprox': 0.005,
+                    'fedbn': 0.01,
+                    'fedap': 0.005,
+                    'metafed': 0.001
+                }
+                args.lr = default_lrs.get(args.alg, 0.01)
             args.n_clients = data.get('n_clients', 20)
             args.partition_data = data.get('partition_data', 'non_iid_dirichlet')
             args.plan = data.get('plan', 1)
@@ -150,9 +183,24 @@ def run_model():
                 return
             
             # 使用实际的客户端数量
+            requested_n_clients = args.n_clients
             actual_n_clients = len(train_loaders)
             args.n_clients = actual_n_clients
             args.cancel_checker = lambda: is_cancel_requested(job_id)
+
+            config_data = {
+                'type': 'training_config',
+                'requested_n_clients': int(requested_n_clients),
+                'actual_n_clients': int(actual_n_clients),
+                'client_count_adjusted': bool(actual_n_clients != requested_n_clients),
+                'message': (
+                    f'实际参与训练的客户端数量为 {actual_n_clients}。'
+                    if actual_n_clients == requested_n_clients
+                    else f'请求客户端数为 {requested_n_clients}，实际参与训练的客户端数为 {actual_n_clients}；'
+                         '部分客户端因划分后训练/验证/测试样本为空被自动跳过。'
+                )
+            }
+            yield f"data: {json.dumps(config_data)}\n\n"
             
             # 初始化算法
             algclass = algs.get_algorithm_class(args.alg)(args)
@@ -179,21 +227,25 @@ def run_model():
             best_acc = [0] * actual_n_clients
             best_tacc = [0] * actual_n_clients
             start_iter = 0
+            accuracy_curve = []
             
             # 计算总步骤数
             personalization_steps = actual_n_clients if args.alg == 'metafed' else 0
-            total_steps = args.iters * args.wk_iters * actual_n_clients + personalization_steps
+            if args.alg == 'metafed':
+                total_steps = args.iters * actual_n_clients + personalization_steps
+            else:
+                total_steps = args.iters * args.wk_iters * actual_n_clients
             current_step = 0
             
             # 开始训练
             for a_iter in range(start_iter, args.iters):
-                # 客户端训练
-                for wi in range(args.wk_iters):
+                if args.alg == 'metafed':
                     for client_idx in range(actual_n_clients):
                         if is_cancel_requested(job_id):
                             yield f"data: {json.dumps({'type': 'cancelled', 'message': '训练已取消'})}\n\n"
                             return
-                        algclass.client_train(client_idx, train_loaders[client_idx], a_iter)
+                        mapped_client_idx = algclass.csort[client_idx]
+                        algclass.client_train(client_idx, train_loaders[mapped_client_idx], a_iter)
                         peak_memory = max(peak_memory, get_memory_mb(process))
 
                         if is_cancel_requested(job_id):
@@ -213,10 +265,46 @@ def run_model():
                             'message': f'训练进度: {progress}% (第 {a_iter+1}/{requested_iters} 轮, 客户端 {client_idx+1}/{actual_n_clients})'
                         }
                         yield f"data: {json.dumps(progress_data)}\n\n"
-                
-                # 服务器聚合
-                algclass.server_aggre()
-                peak_memory = max(peak_memory, get_memory_mb(process))
+                    algclass.update_flag(val_loaders)
+                else:
+                    # 客户端训练
+                    for wi in range(args.wk_iters):
+                        for client_idx in range(actual_n_clients):
+                            if is_cancel_requested(job_id):
+                                yield f"data: {json.dumps({'type': 'cancelled', 'message': '训练已取消'})}\n\n"
+                                return
+                            algclass.client_train(client_idx, train_loaders[client_idx], a_iter)
+                            peak_memory = max(peak_memory, get_memory_mb(process))
+
+                            if is_cancel_requested(job_id):
+                                yield f"data: {json.dumps({'type': 'cancelled', 'message': '训练已取消'})}\n\n"
+                                return
+                            
+                            # 更新进度
+                            current_step += 1
+                            progress = int(current_step / total_steps * 100)
+                            
+                            # 发送进度更新
+                            progress_data = {
+                                'type': 'progress',
+                                'progress': progress,
+                                'current_iter': current_step,
+                                'total_iter': total_steps,
+                                'message': f'训练进度: {progress}% (第 {a_iter+1}/{requested_iters} 轮, 客户端 {client_idx+1}/{actual_n_clients})'
+                            }
+                            yield f"data: {json.dumps(progress_data)}\n\n"
+                    
+                    # 服务器聚合
+                    algclass.server_aggre()
+                    peak_memory = max(peak_memory, get_memory_mb(process))
+
+                curve_point = emit_accuracy_curve_point(
+                    algclass,
+                    test_loaders,
+                    a_iter + 1,
+                    accuracy_curve
+                )
+                yield f"data: {json.dumps({'type': 'round_metrics', **curve_point})}\n\n"
 
                 if is_cancel_requested(job_id):
                     yield f"data: {json.dumps({'type': 'cancelled', 'message': '训练已取消'})}\n\n"
@@ -240,6 +328,14 @@ def run_model():
                         'message': f'训练进度: {progress}% (第 {requested_iters}/{requested_iters} 轮, 个性化阶段 {c_idx+1}/{actual_n_clients})'
                     }
                     yield f"data: {json.dumps(progress_data)}\n\n"
+
+                curve_point = emit_accuracy_curve_point(
+                    algclass,
+                    test_loaders,
+                    requested_iters,
+                    accuracy_curve
+                )
+                yield f"data: {json.dumps({'type': 'round_metrics', **curve_point})}\n\n"
 
             if is_cancel_requested(job_id):
                 yield f"data: {json.dumps({'type': 'cancelled', 'message': '训练已取消'})}\n\n"
@@ -296,8 +392,12 @@ def run_model():
                 'algorithm': args.alg,
                 'dataset': args.dataset,
                 'non_iid_alpha': args.non_iid_alpha,
+                'lr': args.lr,
+                'requested_n_clients': int(requested_n_clients),
+                'actual_n_clients': int(actual_n_clients),
                 'test_accuracies': test_accs,
                 'average_accuracy': mean_acc,
+                'accuracy_curve': accuracy_curve,
                 'training_time': training_time_str,
                 'training_duration_seconds': training_duration
             }
@@ -310,8 +410,9 @@ def run_model():
                 'dataset': args.dataset,
                 'non_iid_alpha': args.non_iid_alpha,
                 'n_clients': actual_n_clients,
-                'iters': args.iters,
+                'iters': requested_iters,
                 'wk_iters': args.wk_iters,
+                'lr': args.lr,
                 'average_accuracy': mean_acc,
                 'training_time': training_time_str,
                 'training_duration_seconds': training_duration,

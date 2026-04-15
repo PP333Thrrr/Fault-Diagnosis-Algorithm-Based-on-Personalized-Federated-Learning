@@ -30,7 +30,7 @@ if __name__ == '__main__':
     parser.add_argument('--iters', type=int, default=300,
                         help='iterations for communication')
     # 学习率
-    parser.add_argument('--lr', type=float, default=1e-2, help='learning rate')
+    parser.add_argument('--lr', type=float, default=None, help='learning rate')
     parser.add_argument('--n_clients', type=int,
                         default=20, help='number of clients')
     # 数据非独立同分布程度（越小，分布约不均匀）
@@ -68,6 +68,16 @@ if __name__ == '__main__':
                         default=0.5, help='hyperparameter for fedap')
     args = parser.parse_args()
     args.dataset = normalize_dataset_name(args.dataset)
+    if args.lr is None:
+        default_lrs = {
+            'base': 1e-2,
+            'fedavg': 1e-2,
+            'fedprox': 5e-3,
+            'fedbn': 1e-2,
+            'fedap': 5e-3,
+            'metafed': 1e-3,
+        }
+        args.lr = default_lrs.get(args.alg, 1e-2)
     if args.device == 'cuda' and not torch.cuda.is_available():
         print('CUDA is not available, falling back to CPU.')
         args.device = 'cpu'

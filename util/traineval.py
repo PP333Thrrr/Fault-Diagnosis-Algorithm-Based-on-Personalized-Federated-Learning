@@ -80,19 +80,16 @@ def train_prox(args, model, server_model, data_loader, optimizer, loss_fun, devi
     loss_all = 0
     total = 0
     correct = 0
-    for step, (data, target) in enumerate(data_loader):
+    for data, target in data_loader:
         check_cancel(args)
         data = data.to(device).float()
         target = target.to(device).long()
         output = model(data)
         loss = loss_fun(output, target)
-        if step > 0:
-            w_diff = torch.tensor(0., device=device)
-            for w, w_t in zip(server_model.parameters(), model.parameters()):
-                w_diff += torch.pow(torch.norm(w - w_t), 2)
-
-            w_diff = torch.sqrt(w_diff)
-            loss += args.mu / 2. * w_diff
+        w_diff = torch.tensor(0., device=device)
+        for w, w_t in zip(server_model.parameters(), model.parameters()):
+            w_diff += torch.sum((w_t - w) ** 2)
+        loss += args.mu / 2. * w_diff
 
         optimizer.zero_grad()
         loss.backward()
@@ -111,16 +108,6 @@ def trainwithteacher(model, data_loader, optimizer, loss_fun, device, tmodel, la
     model.train()
     if tmodel:
         tmodel.eval()
-        if not flag:
-            with torch.no_grad():
-                for key in tmodel.state_dict().keys():
-                    if 'num_batches_tracked' in key:
-                        pass
-                    elif args.nosharebn and 'bn' in key:
-                        pass
-                    else:
-                        model.state_dict()[key].data.copy_(
-                            tmodel.state_dict()[key])
     loss_all = 0
     total = 0
     correct = 0

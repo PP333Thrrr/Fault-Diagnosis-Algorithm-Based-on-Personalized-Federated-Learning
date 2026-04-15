@@ -1,3 +1,4 @@
+# python main.py --alg [算法名称] --dataset [数据集名称] --iters [通信轮数] --wk_iters [本地训练轮数] --non_iid_alpha [数据非独立同分布程度]
 python main.py --alg base --dataset medmnist --iters 100 --wk_iters 3 --non_iid_alpha 0.1
 python main.py --alg fedavg --dataset medmnist --iters 300 --wk_iters 1 --non_iid_alpha 0.1
 python main.py --alg fedprox --dataset medmnist --iters 300 --wk_iters 1 --non_iid_alpha 0.1 --mu 0.1

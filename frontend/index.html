@@ -76,6 +76,11 @@
             font-weight: 600;
             color: #007bff;
         }
+        .status-note {
+            margin-top: 10px;
+            color: #6c757d;
+            font-size: 0.95rem;
+        }
     </style>
 </head>
 <body>
@@ -137,6 +142,12 @@
                                 <label for="n_clients">客户端数量</label>
                                 <input type="number" class="form-control" id="n_clients" name="n_clients" value="20" min="1">
                             </div>
+
+                            <div class="form-group">
+                                <label for="display_lr">当前算法学习率 (lr)</label>
+                                <input type="text" class="form-control" id="display_lr" value="0.01" readonly>
+                                <small class="form-text text-muted">学习率由算法默认配置决定，前端不提供修改。</small>
+                            </div>
                         </div>
                     </div>
                     
@@ -172,6 +183,7 @@
                 </div>
             </div>
             <p class="mt-2" id="progressText">训练进度: 0% (第 0/300 轮)</p>
+            <p class="status-note" id="clientCountNote"></p>
             <button type="button" class="btn btn-danger mt-2" id="cancelTraining" style="display: none;">取消训练</button>
         </div>
         
@@ -186,6 +198,7 @@
                         <p><strong>算法:</strong> <span id="resultAlgorithm"></span></p>
                         <p><strong>数据集:</strong> <span id="resultDataset"></span></p>
                         <p><strong>非独立同分布程度:</strong> <span id="resultAlpha"></span></p>
+                        <p><strong>学习率:</strong> <span id="resultLearningRate"></span></p>
                         <p><strong>平均准确率:</strong> <span id="resultAverageAcc"></span></p>
                         <p><strong>训练时长:</strong> <span id="resultTrainingTime"></span></p>
                     </div>
@@ -200,6 +213,12 @@
                     <h6>准确率分布</h6>
                     <div class="chart-container" style="height: 250px;">
                         <canvas id="accuracyChart"></canvas>
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <h6>各客户端准确率-通信轮次曲线</h6>
+                    <div class="chart-container" style="height: 320px;">
+                        <canvas id="accuracyCurveChart"></canvas>
                     </div>
                 </div>
             </div>
@@ -243,6 +262,13 @@
     <script>
         let activeFetchController = null;
         let trainingRunning = false;
+        let liveAccuracyCurve = [];
+        let streamBuffer = '';
+
+        const clientCurveColors = [
+            '#007bff', '#28a745', '#dc3545', '#ffc107', '#17a2b8',
+            '#6f42c1', '#fd7e14', '#20c997', '#6610f2', '#e83e8c'
+        ];
 
         function setTrainingState(isRunning) {
             trainingRunning = isRunning;
@@ -250,6 +276,126 @@
             document.getElementById('cancelTraining').style.display = isRunning ? 'inline-block' : 'none';
             document.getElementById('cancelTraining').disabled = false;
             document.getElementById('cancelTraining').textContent = '取消训练';
+        }
+
+        function renderAccuracyCurveChart(accuracyCurve) {
+            const ctx = document.getElementById('accuracyCurveChart').getContext('2d');
+            if (window.accuracyCurveChart && typeof window.accuracyCurveChart.destroy === 'function') {
+                window.accuracyCurveChart.destroy();
+            }
+
+            if (!accuracyCurve || accuracyCurve.length === 0) {
+                window.accuracyCurveChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: []
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: true },
+                            title: {
+                                display: true,
+                                text: '暂无轮次准确率数据'
+                            }
+                        }
+                    }
+                });
+                return;
+            }
+
+            const labels = accuracyCurve.map(point => `Round ${point.round}`);
+            const clientCount = Math.max(...accuracyCurve.map(point => point.client_accuracies.length));
+            const datasets = [];
+
+            for (let clientIndex = 0; clientIndex < clientCount; clientIndex++) {
+                const color = clientCurveColors[clientIndex % clientCurveColors.length];
+                datasets.push({
+                    label: `客户端 ${clientIndex + 1}`,
+                    data: accuracyCurve.map(point => {
+                        const value = point.client_accuracies[clientIndex];
+                        return typeof value === 'number' ? value * 100 : null;
+                    }),
+                    borderColor: color,
+                    backgroundColor: color,
+                    borderWidth: 2,
+                    pointRadius: 3,
+                    tension: 0.25,
+                    fill: false
+                });
+            }
+
+            datasets.push({
+                label: '平均准确率',
+                data: accuracyCurve.map(point => point.average_accuracy * 100),
+                borderColor: '#343a40',
+                backgroundColor: '#343a40',
+                borderWidth: 3,
+                borderDash: [6, 4],
+                pointRadius: 3,
+                tension: 0.25,
+                fill: false
+            });
+
+            window.accuracyCurveChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'bottom'
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return `${context.dataset.label}: ${context.parsed.y.toFixed(2)}%`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: '准确率 (%)'
+                            }
+                        },
+                        x: {
+                            title: {
+                                display: true,
+                                text: '通信轮次'
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        const defaultLearningRates = {
+            base: 0.01,
+            fedavg: 0.01,
+            fedprox: 0.005,
+            fedbn: 0.01,
+            fedap: 0.005,
+            metafed: 0.001
+        };
+
+        function getDefaultLearningRate(algorithm) {
+            return defaultLearningRates[algorithm] ?? 0.01;
         }
 
         // 算法参数显示控制
@@ -260,6 +406,7 @@
             document.getElementById('fedproxParams').style.display = 'none';
             document.getElementById('fedapParams').style.display = 'none';
             document.getElementById('metafedParams').style.display = 'none';
+            document.getElementById('display_lr').value = getDefaultLearningRate(algorithm);
             
             // 显示对应算法的参数面板
             if (algorithm === 'fedprox') {
@@ -281,6 +428,9 @@
             document.getElementById('loading').style.display = 'block';
             document.getElementById('resultCard').style.display = 'none';
             setTrainingState(true);
+            liveAccuracyCurve = [];
+            streamBuffer = '';
+            document.getElementById('clientCountNote').textContent = '';
             
             // 重置进度条
             document.getElementById('progressBar').style.width = '0%';
@@ -325,8 +475,9 @@
                             return;
                         }
                         
-                        const chunk = decoder.decode(value, { stream: true });
-                        const lines = chunk.split('\n\n');
+                        streamBuffer += decoder.decode(value, { stream: true });
+                        const lines = streamBuffer.split('\n\n');
+                        streamBuffer = lines.pop();
                         
                         lines.forEach(line => {
                             if (line.startsWith('data: ')) {
@@ -338,6 +489,14 @@
                                         document.getElementById('progressBar').style.width = data.progress + '%';
                                         document.getElementById('progressBar').textContent = data.progress + '%';
                                         document.getElementById('progressText').textContent = data.message;
+                                    } else if (data.type === 'training_config') {
+                                        document.getElementById('clientCountNote').textContent = data.message || '';
+                                    } else if (data.type === 'round_metrics') {
+                                        liveAccuracyCurve.push({
+                                            round: data.round,
+                                            client_accuracies: data.client_accuracies,
+                                            average_accuracy: data.average_accuracy
+                                        });
                                     } else if (data.type === 'result') {
                                         // 隐藏加载状态
                                         document.getElementById('loading').style.display = 'none';
@@ -349,8 +508,16 @@
                                         document.getElementById('resultAlgorithm').textContent = data.algorithm;
                                         document.getElementById('resultDataset').textContent = data.dataset;
                                         document.getElementById('resultAlpha').textContent = data.non_iid_alpha;
+                                        document.getElementById('resultLearningRate').textContent = data.lr;
                                         document.getElementById('resultAverageAcc').textContent = (data.average_accuracy * 100).toFixed(2) + '%';
                                         document.getElementById('resultTrainingTime').textContent = data.training_time;
+                                        if (typeof data.actual_n_clients === 'number') {
+                                            document.getElementById('clientCountNote').textContent =
+                                                `本次训练实际参与客户端数：${data.actual_n_clients}` +
+                                                (data.requested_n_clients !== data.actual_n_clients
+                                                    ? `（请求 ${data.requested_n_clients}）`
+                                                    : '');
+                                        }
                                         
                                         // 生成准确率分布图
                                         const ctx = document.getElementById('accuracyChart').getContext('2d');
@@ -419,6 +586,8 @@
                                             },
                                             options: chartOptions
                                         });
+
+                                        renderAccuracyCurveChart(data.accuracy_curve || liveAccuracyCurve);
                                         
                                         // 显示客户端准确率摘要
                                         const accuracySummary = document.getElementById('accuracySummary');
@@ -515,14 +684,18 @@
                             const row = document.createElement('tr');
                             
                             // 算法参数显示
-                            let algoParam = '-';
-                            if (record.algorithm === 'metafed' && record.threshold) {
-                                algoParam = `threshold: ${record.threshold}`;
-                            } else if (record.algorithm === 'fedprox' && record.mu) {
-                                algoParam = `mu: ${record.mu}`;
-                            } else if (record.algorithm === 'fedap' && record.model_momentum) {
-                                algoParam = `momentum: ${record.model_momentum}`;
+                            const algoParams = [];
+                            if (typeof record.lr !== 'undefined') {
+                                algoParams.push(`lr: ${record.lr}`);
                             }
+                            if (record.algorithm === 'metafed' && record.threshold) {
+                                algoParams.push(`threshold: ${record.threshold}`);
+                            } else if (record.algorithm === 'fedprox' && record.mu) {
+                                algoParams.push(`mu: ${record.mu}`);
+                            } else if (record.algorithm === 'fedap' && record.model_momentum) {
+                                algoParams.push(`momentum: ${record.model_momentum}`);
+                            }
+                            const algoParam = algoParams.length > 0 ? algoParams.join(', ') : '-';
                             
                             // 故障诊断指标显示
                             const precision = record.precision ? (record.precision * 100).toFixed(2) + '%' : '-';
