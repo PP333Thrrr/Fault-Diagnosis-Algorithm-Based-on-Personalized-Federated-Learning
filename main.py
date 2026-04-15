@@ -49,6 +49,8 @@ if __name__ == '__main__':
     # 本地训练轮数
     parser.add_argument('--wk_iters', type=int, default=1,
                         help='optimization iters in local worker between communication')
+    parser.add_argument('--eval_every', type=int, default=1,
+                        help='run full evaluation every N communication rounds')
     # 不共享BN层
     parser.add_argument('--nosharebn', action='store_true',
                         help='not share bn')
@@ -67,6 +69,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_momentum', type=float,
                         default=0.5, help='hyperparameter for fedap')
     args = parser.parse_args()
+    args.eval_every = max(1, args.eval_every)
     args.dataset = normalize_dataset_name(args.dataset)
     if args.lr is None:
         default_lrs = {
@@ -121,7 +124,6 @@ if __name__ == '__main__':
     last_eval_iter = 0
 
     for a_iter in range(start_iter, args.iters):
-        last_eval_iter = a_iter
         print(f"============ Train round {a_iter} ============")
 
         if args.alg == 'metafed':
@@ -140,8 +142,11 @@ if __name__ == '__main__':
             # server aggregation
             algclass.server_aggre()
 
-        best_acc, best_tacc, best_changed = evalandprint(
-            args, algclass, train_loaders, val_loaders, test_loaders, SAVE_PATH, best_acc, best_tacc, a_iter, best_changed)
+        should_eval = (a_iter % args.eval_every == 0) or (a_iter == args.iters - 1)
+        if should_eval:
+            last_eval_iter = a_iter
+            best_acc, best_tacc, best_changed = evalandprint(
+                args, algclass, train_loaders, val_loaders, test_loaders, SAVE_PATH, best_acc, best_tacc, a_iter, best_changed)
 
     # metafed 特殊处理
     if args.alg == 'metafed':
@@ -170,10 +175,10 @@ if __name__ == '__main__':
             f'Recall: {recall:.4f} | F1: {f1:.4f}'
         )
 
-    mean_acc_test = np.mean(np.array(final_accs))
-    mean_precision_test = np.mean(np.array(final_precisions))
-    mean_recall_test = np.mean(np.array(final_recalls))
-    mean_f1_test = np.mean(np.array(final_f1s))
+    mean_acc_test = np.mean(final_accs)
+    mean_precision_test = np.mean(final_precisions)
+    mean_recall_test = np.mean(final_recalls)
+    mean_f1_test = np.mean(final_f1s)
     metric_lines.append(f'Average accuracy: {mean_acc_test:.4f}')
     metric_lines.append(f'Average precision: {mean_precision_test:.4f}')
     metric_lines.append(f'Average recall: {mean_recall_test:.4f}')

@@ -4,6 +4,7 @@ import os
 import math
 import functools
 import json
+import pickle
 import torch.distributed as dist
 
 
@@ -437,13 +438,11 @@ def getdataloader(conf, dataall, root_dir='./split/'):
                 tmparr.append([])
                 tmparr.append([])
         # 使用Python列表直接保存，避免NumPy形状不一致问题
-        import pickle
         with open(file, 'wb') as f:
             pickle.dump(tmparr, f)
     else:
         conf.partition_data = 'origin'
         data_part = define_data_loader(conf, dataall)
-    import pickle
     with open(file, 'rb') as f:
         data_part.partitions = pickle.load(f)
     clienttrain_list = []

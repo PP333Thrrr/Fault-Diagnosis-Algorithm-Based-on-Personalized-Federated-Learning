@@ -138,6 +138,12 @@
                                 <label for="wk_iters">本地训练轮数</label>
                                 <input type="number" class="form-control" id="wk_iters" name="wk_iters" value="1" min="1">
                             </div>
+
+                            <div class="form-group">
+                                <label for="eval_every">评估频率</label>
+                                <input type="number" class="form-control" id="eval_every" name="eval_every" value="1" min="1">
+                                <small class="form-text text-muted">每 N 轮通信做一次全量评估；设为 5 或 10 可明显提速。</small>
+                            </div>
                             
                             <div class="form-group">
                                 <label for="n_clients">客户端数量</label>
@@ -200,6 +206,7 @@
                         <p><strong>数据集:</strong> <span id="resultDataset"></span></p>
                         <p><strong>非独立同分布程度:</strong> <span id="resultAlpha"></span></p>
                         <p><strong>学习率:</strong> <span id="resultLearningRate"></span></p>
+                        <p><strong>评估频率:</strong> <span id="resultEvalEvery"></span></p>
                         <p><strong>平均准确率:</strong> <span id="resultAverageAcc"></span></p>
                         <p><strong>训练时长:</strong> <span id="resultTrainingTime"></span></p>
                     </div>
@@ -238,10 +245,11 @@
                                 <th>算法</th>
                                 <th>数据集</th>
                                 <th>客户端数</th>
-                                <th>通信轮数</th>
-                                <th>非IID程度</th>
-                                <th>算法参数</th>
-                                <th>平均准确率</th>
+                <th>通信轮数</th>
+                <th>评估频率</th>
+                <th>非IID程度</th>
+                <th>算法参数</th>
+                <th>平均准确率</th>
                                 <th>精确率</th>
                                 <th>召回率</th>
                                 <th>F1分数</th>
@@ -251,7 +259,7 @@
                         </thead>
                         <tbody id="historyBody">
                             <tr>
-                                <td colspan="7" class="text-center">加载历史记录中...</td>
+                                <td colspan="14" class="text-center">加载历史记录中...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -261,10 +269,10 @@
     </div>
     
     <script>
-        let activeFetchController = null;
+        let activeEventSource = null;
+        let activeJobId = null;
         let trainingRunning = false;
         let liveAccuracyCurve = [];
-        let streamBuffer = '';
 
         const clientCurveColors = [
             '#007bff', '#28a745', '#dc3545', '#ffc107', '#17a2b8',
@@ -456,6 +464,143 @@
         document.getElementById('dataset').addEventListener('change', function() {
             syncDatasetDependentControls();
         });
+
+        function closeTrainingStream() {
+            if (activeEventSource) {
+                activeEventSource.close();
+                activeEventSource = null;
+            }
+            activeJobId = null;
+        }
+
+        function finishTrainingUI() {
+            document.getElementById('loading').style.display = 'none';
+            setTrainingState(false);
+            closeTrainingStream();
+        }
+
+        function handleTrainingEvent(data) {
+            if (data.type === 'progress') {
+                document.getElementById('progressBar').style.width = data.progress + '%';
+                document.getElementById('progressBar').textContent = data.progress + '%';
+                document.getElementById('progressText').textContent = data.message;
+            } else if (data.type === 'training_config') {
+                document.getElementById('clientCountNote').textContent = data.message || '';
+            } else if (data.type === 'round_metrics') {
+                liveAccuracyCurve.push({
+                    round: data.round,
+                    client_accuracies: data.client_accuracies,
+                    average_accuracy: data.average_accuracy
+                });
+            } else if (data.type === 'result') {
+                finishTrainingUI();
+
+                document.getElementById('resultCard').style.display = 'block';
+                document.getElementById('resultAlgorithm').textContent = data.algorithm;
+                document.getElementById('resultDataset').textContent = data.dataset;
+                document.getElementById('resultAlpha').textContent = data.non_iid_alpha;
+                document.getElementById('resultLearningRate').textContent = data.lr;
+                document.getElementById('resultEvalEvery').textContent = `每 ${data.eval_every || 1} 轮`;
+                document.getElementById('resultAverageAcc').textContent = (data.average_accuracy * 100).toFixed(2) + '%';
+                document.getElementById('resultTrainingTime').textContent = data.training_time;
+                if (typeof data.actual_n_clients === 'number') {
+                    document.getElementById('clientCountNote').textContent =
+                        `本次训练实际参与客户端数：${data.actual_n_clients}` +
+                        (data.requested_n_clients !== data.actual_n_clients
+                            ? `（请求 ${data.requested_n_clients}）`
+                            : '');
+                }
+
+                const ctx = document.getElementById('accuracyChart').getContext('2d');
+                if (window.accuracyChart && typeof window.accuracyChart.destroy === 'function') {
+                    window.accuracyChart.destroy();
+                }
+
+                const chartOptions = {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return `准确率: ${context.parsed.y.toFixed(2)}%`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: '准确率 (%)'
+                            },
+                            ticks: {
+                                maxTicksLimit: 6
+                            }
+                        },
+                        x: {
+                            ticks: {
+                                maxRotation: 45,
+                                minRotation: 45,
+                                maxTicksLimit: 10
+                            }
+                        }
+                    }
+                };
+
+                const labels = data.test_accuracies.map((_, index) => {
+                    if (data.test_accuracies.length > 10) {
+                        return `Client ${index + 1}`;
+                    }
+                    return `客户端 ${index + 1}`;
+                });
+
+                window.accuracyChart = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: '准确率',
+                            data: data.test_accuracies.map(acc => acc * 100),
+                            backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                            borderColor: 'rgba(75, 192, 192, 1)',
+                            borderWidth: 1
+                        }]
+                    },
+                    options: chartOptions
+                });
+
+                renderAccuracyCurveChart(data.accuracy_curve || liveAccuracyCurve);
+
+                const accuracySummary = document.getElementById('accuracySummary');
+                accuracySummary.innerHTML = `
+                    <div class="summary-item">
+                        <span class="label">最高准确率:</span>
+                        <span class="value">${(Math.max(...data.test_accuracies) * 100).toFixed(2)}%</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="label">最低准确率:</span>
+                        <span class="value">${(Math.min(...data.test_accuracies) * 100).toFixed(2)}%</span>
+                    </div>
+                    <div class="summary-item">
+                        <span class="label">准确率标准差:</span>
+                        <span class="value">${Math.sqrt(data.test_accuracies.reduce((sum, acc) => sum + Math.pow(acc - data.average_accuracy, 2), 0) / data.test_accuracies.length).toFixed(4)}</span>
+                    </div>
+                `;
+                loadHistory();
+            } else if (data.type === 'cancelled') {
+                finishTrainingUI();
+                alert(data.message || '训练已取消');
+            } else if (data.type === 'error') {
+                finishTrainingUI();
+                alert('错误: ' + data.error);
+            }
+        }
         
         // 运行模型按钮点击事件
         document.getElementById('runModel').addEventListener('click', function() {
@@ -468,8 +613,8 @@
             document.getElementById('resultCard').style.display = 'none';
             setTrainingState(true);
             liveAccuracyCurve = [];
-            streamBuffer = '';
             document.getElementById('clientCountNote').textContent = '';
+            closeTrainingStream();
             
             // 重置进度条
             document.getElementById('progressBar').style.width = '0%';
@@ -482,6 +627,7 @@
                 dataset: document.getElementById('dataset').value,
                 iters: parseInt(document.getElementById('iters').value),
                 wk_iters: parseInt(document.getElementById('wk_iters').value),
+                eval_every: parseInt(document.getElementById('eval_every').value),
                 non_iid_alpha: parseFloat(document.getElementById('non_iid_alpha').value),
                 n_clients: parseInt(document.getElementById('n_clients').value),
                 mu: parseFloat(document.getElementById('mu').value),
@@ -489,192 +635,44 @@
                 threshold: parseFloat(document.getElementById('threshold').value)
             };
             
-            // 由于 EventSource 不支持 POST 请求，改用 fetch 配合 ReadableStream
-            activeFetchController = new AbortController();
             fetch('http://localhost:5001/api/run-model', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify(formData),
-                signal: activeFetchController.signal
+                body: JSON.stringify(formData)
             })
-            .then(response => {
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                
-                function readStream() {
-                    return reader.read().then(({ done, value }) => {
-                        if (done) {
-                            activeFetchController = null;
-                            if (trainingRunning) {
-                                document.getElementById('loading').style.display = 'none';
-                                setTrainingState(false);
-                            }
-                            return;
-                        }
-                        
-                        streamBuffer += decoder.decode(value, { stream: true });
-                        const lines = streamBuffer.split('\n\n');
-                        streamBuffer = lines.pop();
-                        
-                        lines.forEach(line => {
-                            if (line.startsWith('data: ')) {
-                                try {
-                                    const data = JSON.parse(line.substring(6));
-                                    
-                                    if (data.type === 'progress') {
-                                        // 更新进度条
-                                        document.getElementById('progressBar').style.width = data.progress + '%';
-                                        document.getElementById('progressBar').textContent = data.progress + '%';
-                                        document.getElementById('progressText').textContent = data.message;
-                                    } else if (data.type === 'training_config') {
-                                        document.getElementById('clientCountNote').textContent = data.message || '';
-                                    } else if (data.type === 'round_metrics') {
-                                        liveAccuracyCurve.push({
-                                            round: data.round,
-                                            client_accuracies: data.client_accuracies,
-                                            average_accuracy: data.average_accuracy
-                                        });
-                                    } else if (data.type === 'result') {
-                                        // 隐藏加载状态
-                                        document.getElementById('loading').style.display = 'none';
-                                        setTrainingState(false);
-                                        activeFetchController = null;
-                                        
-                                        // 显示结果
-                                        document.getElementById('resultCard').style.display = 'block';
-                                        document.getElementById('resultAlgorithm').textContent = data.algorithm;
-                                        document.getElementById('resultDataset').textContent = data.dataset;
-                                        document.getElementById('resultAlpha').textContent = data.non_iid_alpha;
-                                        document.getElementById('resultLearningRate').textContent = data.lr;
-                                        document.getElementById('resultAverageAcc').textContent = (data.average_accuracy * 100).toFixed(2) + '%';
-                                        document.getElementById('resultTrainingTime').textContent = data.training_time;
-                                        if (typeof data.actual_n_clients === 'number') {
-                                            document.getElementById('clientCountNote').textContent =
-                                                `本次训练实际参与客户端数：${data.actual_n_clients}` +
-                                                (data.requested_n_clients !== data.actual_n_clients
-                                                    ? `（请求 ${data.requested_n_clients}）`
-                                                    : '');
-                                        }
-                                        
-                                        // 生成准确率分布图
-                                        const ctx = document.getElementById('accuracyChart').getContext('2d');
-                                        if (window.accuracyChart && typeof window.accuracyChart.destroy === 'function') {
-                                            window.accuracyChart.destroy();
-                                        }
-                                        
-                                        // 优化图表显示，当客户端数量较多时使用更紧凑的布局
-                                        const chartOptions = {
-                                            responsive: true,
-                                            maintainAspectRatio: false,
-                                            plugins: {
-                                                legend: {
-                                                    display: false
-                                                },
-                                                tooltip: {
-                                                    callbacks: {
-                                                        label: function(context) {
-                                                            return `准确率: ${context.parsed.y.toFixed(2)}%`;
-                                                        }
-                                                    }
-                                                }
-                                            },
-                                            scales: {
-                                                y: {
-                                                    beginAtZero: true,
-                                                    max: 100,
-                                                    title: {
-                                                        display: true,
-                                                        text: '准确率 (%)'
-                                                    },
-                                                    ticks: {
-                                                        maxTicksLimit: 6
-                                                    }
-                                                },
-                                                x: {
-                                                    ticks: {
-                                                        maxRotation: 45,
-                                                        minRotation: 45,
-                                                        maxTicksLimit: 10
-                                                    }
-                                                }
-                                            }
-                                        };
-                                        
-                                        // 当客户端数量超过10个时，使用更紧凑的标签
-                                        const labels = data.test_accuracies.map((_, index) => {
-                                            if (data.test_accuracies.length > 10) {
-                                                return `Client ${index + 1}`;
-                                            } else {
-                                                return `客户端 ${index + 1}`;
-                                            }
-                                        });
-                                        
-                                        window.accuracyChart = new Chart(ctx, {
-                                            type: 'bar',
-                                            data: {
-                                                labels: labels,
-                                                datasets: [{
-                                                    label: '准确率',
-                                                    data: data.test_accuracies.map(acc => acc * 100),
-                                                    backgroundColor: 'rgba(75, 192, 192, 0.6)',
-                                                    borderColor: 'rgba(75, 192, 192, 1)',
-                                                    borderWidth: 1
-                                                }]
-                                            },
-                                            options: chartOptions
-                                        });
-
-                                        renderAccuracyCurveChart(data.accuracy_curve || liveAccuracyCurve);
-                                        
-                                        // 显示客户端准确率摘要
-                                        const accuracySummary = document.getElementById('accuracySummary');
-                                        accuracySummary.innerHTML = `
-                                            <div class="summary-item">
-                                                <span class="label">最高准确率:</span>
-                                                <span class="value">${(Math.max(...data.test_accuracies) * 100).toFixed(2)}%</span>
-                                            </div>
-                                            <div class="summary-item">
-                                                <span class="label">最低准确率:</span>
-                                                <span class="value">${(Math.min(...data.test_accuracies) * 100).toFixed(2)}%</span>
-                                            </div>
-                                            <div class="summary-item">
-                                                <span class="label">准确率标准差:</span>
-                                                <span class="value">${Math.sqrt(data.test_accuracies.reduce((sum, acc) => sum + Math.pow(acc - data.average_accuracy, 2), 0) / data.test_accuracies.length).toFixed(4)}</span>
-                                            </div>
-                                        `;
-                                    } else if (data.type === 'cancelled') {
-                                        document.getElementById('loading').style.display = 'none';
-                                        setTrainingState(false);
-                                        activeFetchController = null;
-                                        alert(data.message || '训练已取消');
-                                    } else if (data.type === 'error') {
-                                        // 隐藏加载状态
-                                        document.getElementById('loading').style.display = 'none';
-                                        setTrainingState(false);
-                                        activeFetchController = null;
-                                        alert('错误: ' + data.error);
-                                    }
-                                } catch (e) {
-                                    console.error('解析数据失败:', e);
-                                }
-                            }
-                        });
-                        
-                        return readStream();
-                    });
+            .then(async response => {
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    throw new Error(result.error || result.message || '启动训练失败');
                 }
-                
-                return readStream();
+
+                activeJobId = result.job_id;
+                activeEventSource = new EventSource(`http://localhost:5001${result.stream_url}`);
+
+                activeEventSource.onmessage = function(event) {
+                    try {
+                        handleTrainingEvent(JSON.parse(event.data));
+                    } catch (e) {
+                        console.error('解析训练事件失败:', e);
+                    }
+                };
+
+                activeEventSource.onerror = function() {
+                    if (!trainingRunning) {
+                        closeTrainingStream();
+                        return;
+                    }
+
+                    finishTrainingUI();
+                    alert('训练流连接中断，请检查后端服务状态。');
+                };
             })
             .catch(error => {
                 document.getElementById('loading').style.display = 'none';
                 setTrainingState(false);
-                activeFetchController = null;
-                if (error.name === 'AbortError') {
-                    return;
-                }
+                closeTrainingStream();
                 alert('请求失败: ' + error.message);
             });
         });
@@ -691,7 +689,8 @@
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
-                }
+                },
+                body: JSON.stringify({ job_id: activeJobId })
             })
             .then(async response => {
                 const result = await response.json();
@@ -748,6 +747,7 @@
                                 <td>${record.dataset}</td>
                                 <td>${record.n_clients}</td>
                                 <td>${record.iters}</td>
+                                <td>${record.eval_every || 1}</td>
                                 <td>${record.non_iid_alpha}</td>
                                 <td>${algoParam}</td>
                                 <td>${(record.average_accuracy * 100).toFixed(2)}%</td>
@@ -761,14 +761,14 @@
                         });
                     } else {
                         const row = document.createElement('tr');
-                        row.innerHTML = '<td colspan="13" class="text-center">暂无历史训练记录</td>';
+                        row.innerHTML = '<td colspan="14" class="text-center">暂无历史训练记录</td>';
                         historyBody.appendChild(row);
                     }
                 })
                 .catch(error => {
                     console.error('加载历史记录失败:', error);
                     const historyBody = document.getElementById('historyBody');
-                    historyBody.innerHTML = '<tr><td colspan="7" class="text-center text-danger">加载历史记录失败</td></tr>';
+                    historyBody.innerHTML = '<tr><td colspan="14" class="text-center text-danger">加载历史记录失败</td></tr>';
                 });
         }
         
@@ -777,6 +777,7 @@
         
         // 页面加载时自动加载历史记录
         window.addEventListener('load', loadHistory);
+        window.addEventListener('beforeunload', closeTrainingStream);
     </script>
 </body>
 </html>

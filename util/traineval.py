@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 from datautil.datasplit import define_pretrain_dataset
 from datautil.prepare_data import get_whole_dataset
@@ -77,8 +78,6 @@ def test(model, data_loader, loss_fun, device):
 
         accuracy = correct/total
         
-        # 计算精确率、召回率、F1分数
-        from sklearn.metrics import precision_score, recall_score, f1_score
         precision = precision_score(all_targets, all_preds, average='macro', zero_division=0)
         recall = recall_score(all_targets, all_preds, average='macro', zero_division=0)
         f1 = f1_score(all_targets, all_preds, average='macro', zero_division=0)

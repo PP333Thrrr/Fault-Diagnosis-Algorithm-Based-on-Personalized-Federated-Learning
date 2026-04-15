@@ -29,11 +29,12 @@ class fedap(fedavg):
 def get_form(model):
     tmpm = []
     tmpv = []
-    for name in model.state_dict().keys():
+    model_state = model.state_dict()
+    for name in model_state.keys():
         if 'running_mean' in name:
-            tmpm.append(model.state_dict()[name].detach().to('cpu').numpy())
+            tmpm.append(model_state[name].detach().to('cpu').numpy())
         if 'running_var' in name:
-            tmpv.append(model.state_dict()[name].detach().to('cpu').numpy())
+            tmpv.append(model_state[name].detach().to('cpu').numpy())
     return tmpm, tmpv
 
 

@@ -41,15 +41,17 @@ class metafed(torch.nn.Module):
         if teacher_model is None:
             return
         with torch.no_grad():
-            for key in teacher_model.state_dict().keys():
+            teacher_state = teacher_model.state_dict()
+            student_state = student_model.state_dict()
+            for key in teacher_state.keys():
                 if 'num_batches_tracked' in key:
                     continue
                 if self.args.nosharebn and 'bn' in key:
                     continue
                 if self._is_personalized_head_key(student_model, key):
                     continue
-                student_model.state_dict()[key].data.copy_(
-                    teacher_model.state_dict()[key].data
+                student_state[key].data.copy_(
+                    teacher_state[key].data
                 )
 
     def _refresh_teacher_models(self, round_idx):

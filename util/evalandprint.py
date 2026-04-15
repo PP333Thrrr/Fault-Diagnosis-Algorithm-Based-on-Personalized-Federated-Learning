@@ -39,7 +39,7 @@ def evalandprint(args, algclass, train_loaders, val_loaders, test_loaders, SAVE_
                 f'Test Precision: {test_precision:.4f} | Test Recall: {test_recall:.4f} | Test F1: {test_f1:.4f}')
             best_tacc[client_idx] = test_acc
         print(f' Saving the local and server checkpoint to {SAVE_PATH}')
-        tosave = {'best_epoch': best_epoch, 'best_acc': best_acc, 'best_tacc': np.mean(np.array(best_tacc))}
+        tosave = {'best_epoch': best_epoch, 'best_acc': best_acc, 'best_tacc': np.mean(best_tacc)}
         for i,tmodel in enumerate(algclass.client_model):
             tosave['client_model_'+str(i)]=tmodel.state_dict()
         tosave['server_model']=algclass.server_model.state_dict()
