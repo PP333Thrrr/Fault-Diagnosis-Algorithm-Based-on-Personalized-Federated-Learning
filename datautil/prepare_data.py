@@ -5,7 +5,7 @@ from torchvision.datasets import ImageFolder
 from torchvision.datasets.folder import default_loader
 from torch.utils.data import Dataset
 from datautil.datasplit import getdataloader
-from datautil.fault_preprocess import normalize_time_series_samples, remap_targets_to_contiguous
+from datautil.fault_preprocess import remap_targets_to_contiguous
 from PIL import ImageFile
 from util.config import normalize_dataset_name
 
@@ -104,6 +104,79 @@ class MedMnistDataset(Dataset):
         return self.data[idx], self.targets[idx]
 
 
+class PartitionTransformDataset(Dataset):
+    def __init__(self, dataset, transform=None, target_transform=None):
+        self.dataset = dataset
+        self.transform = transform
+        self.target_transform = target_transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        data, target = self.dataset[idx]
+        if self.transform is not None:
+            data = self.transform(data)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return data, target
+
+
+class TensorZScoreTransform(object):
+    def __init__(self, mean, std):
+        self.mean = mean.detach().clone().float()
+        self.std = std.detach().clone().float()
+
+    def __call__(self, tensor):
+        tensor = tensor.float()
+        return (tensor - self.mean) / self.std
+
+
+def build_train_dataloader(dataset, batch_size):
+    dataset_size = len(dataset)
+    if dataset_size < 2:
+        return None
+
+    effective_batch_size = min(batch_size, dataset_size)
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=effective_batch_size,
+        shuffle=True,
+        drop_last=True,
+    )
+
+
+def compute_partition_channel_stats(partition, eps=1e-6):
+    base_dataset = partition.data
+    if not hasattr(base_dataset, 'data'):
+        raise ValueError('Partition dataset does not expose raw tensor data for normalization.')
+
+    indices = torch.as_tensor(partition.indices, dtype=torch.long)
+    samples = base_dataset.data[indices]
+    if not torch.is_tensor(samples):
+        samples = torch.as_tensor(samples)
+    samples = samples.float()
+
+    if samples.ndim < 2:
+        raise ValueError('Expected partition samples to have at least 2 dimensions.')
+
+    reduce_dims = (0,) + tuple(range(2, samples.ndim))
+    mean = samples.mean(dim=reduce_dims, keepdim=True)
+    std = samples.std(dim=reduce_dims, keepdim=True, unbiased=False)
+    std = torch.where(std < eps, torch.ones_like(std), std)
+    return mean, std
+
+
+def wrap_client_partitions_with_train_stats(train_partition, val_partition, test_partition):
+    mean, std = compute_partition_channel_stats(train_partition)
+    transform = TensorZScoreTransform(mean, std)
+    return (
+        PartitionTransformDataset(train_partition, transform=transform),
+        PartitionTransformDataset(val_partition, transform=transform),
+        PartitionTransformDataset(test_partition, transform=transform),
+    )
+
+
 class PamapDataset(Dataset):
     def __init__(self, filename='../data/pamap/', transform=None):
         self.data = np.load(filename+'x.npy')
@@ -159,7 +232,6 @@ class CWRUDataset(Dataset):
     def __init__(self, filename='../data/cwru/', transform=None):
         self.data = np.load(filename+'x.npy').astype(np.float32)
         self.data = np.nan_to_num(self.data, nan=0.0, posinf=0.0, neginf=0.0)
-        self.data = normalize_time_series_samples(self.data, method='zscore')
         raw_targets = np.load(filename+'y.npy')
         self.targets, self.target_mapping = remap_targets_to_contiguous(raw_targets)
         self.transform = transform
@@ -179,7 +251,6 @@ class SEUDataset(Dataset):
     def __init__(self, filename='../data/seu/', transform=None):
         self.data = np.load(filename+'x.npy').astype(np.float32)
         self.data = np.nan_to_num(self.data, nan=0.0, posinf=0.0, neginf=0.0)
-        self.data = normalize_time_series_samples(self.data, method='zscore')
         raw_targets = np.load(filename+'y.npy')
         self.targets, self.target_mapping = remap_targets_to_contiguous(raw_targets)
         self.transform = transform
@@ -193,6 +264,15 @@ class SEUDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.data[idx], self.targets[idx]
+
+
+STANDARDIZED_TENSOR_DATASETS = (
+    MedMnistDataset,
+    PamapDataset,
+    CovidDataset,
+    CWRUDataset,
+    SEUDataset,
+)
 
 
 def getfeadataloader(args):
@@ -215,8 +295,12 @@ def getfeadataloader(args):
         trl.append(torch.utils.data.Subset(train_data, index[:l1]))
         val.append(torch.utils.data.Subset(val_data, index[l1:l1+l2]))
         tel.append(torch.utils.data.Subset(test_data, index[l1+l2:l1+l2+l3]))
-        trd.append(torch.utils.data.DataLoader(
-            trl[-1], batch_size=args.batch, shuffle=True))
+        if len(val[-1]) == 0 or len(tel[-1]) == 0:
+            continue
+        train_loader = build_train_dataloader(trl[-1], args.batch)
+        if train_loader is None:
+            continue
+        trd.append(train_loader)
         vad.append(torch.utils.data.DataLoader(
             val[-1], batch_size=args.batch, shuffle=False))
         ted.append(torch.utils.data.DataLoader(
@@ -232,12 +316,27 @@ def getlabeldataloader(args, data):
     trl, val, tel = getdataloader(args, data)
     trd, vad, ted = [], [], []
     for i in range(len(trl)):
-        trd.append(torch.utils.data.DataLoader(
-            trl[i], batch_size=args.batch, shuffle=True))
+        train_dataset = trl[i]
+        val_dataset = val[i]
+        test_dataset = tel[i]
+        if len(train_dataset) < 2:
+            continue
+        if len(val_dataset) == 0 or len(test_dataset) == 0:
+            continue
+
+        if isinstance(data, STANDARDIZED_TENSOR_DATASETS):
+            train_dataset, val_dataset, test_dataset = wrap_client_partitions_with_train_stats(
+                trl[i], val[i], tel[i]
+            )
+
+        train_loader = build_train_dataloader(train_dataset, args.batch)
+        if train_loader is None:
+            continue
+        trd.append(train_loader)
         vad.append(torch.utils.data.DataLoader(
-            val[i], batch_size=args.batch, shuffle=False))
+            val_dataset, batch_size=args.batch, shuffle=False))
         ted.append(torch.utils.data.DataLoader(
-            tel[i], batch_size=args.batch, shuffle=False))
+            test_dataset, batch_size=args.batch, shuffle=False))
     return trd, vad, ted
 
 

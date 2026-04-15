@@ -124,6 +124,7 @@ def run_model():
             class Args:
                 pass
             
+            frontend_requested_n_clients = data.get('n_clients', 20)
             args = Args()
             args.alg = data.get('alg', 'fedavg')
             args.dataset = data.get('dataset', 'medmnist')
@@ -166,7 +167,8 @@ def run_model():
             set_random_seed(args.seed)
             
             # 处理图像数据集的特殊参数
-            if args.dataset in ['vlcs', 'pacs', 'officehome', 'office-caltech']:
+            uses_domain_split = args.dataset in ['vlcs', 'pacs', 'officehome', 'office-caltech']
+            if uses_domain_split:
                 args = img_param_init(args)
                 args.n_clients = 4
             
@@ -183,21 +185,26 @@ def run_model():
                 return
             
             # 使用实际的客户端数量
-            requested_n_clients = args.n_clients
             actual_n_clients = len(train_loaders)
             args.n_clients = actual_n_clients
             args.cancel_checker = lambda: is_cancel_requested(job_id)
 
             config_data = {
                 'type': 'training_config',
-                'requested_n_clients': int(requested_n_clients),
+                'requested_n_clients': int(frontend_requested_n_clients),
                 'actual_n_clients': int(actual_n_clients),
-                'client_count_adjusted': bool(actual_n_clients != requested_n_clients),
+                'client_count_adjusted': bool(actual_n_clients != frontend_requested_n_clients),
+                'uses_domain_split': uses_domain_split,
                 'message': (
-                    f'实际参与训练的客户端数量为 {actual_n_clients}。'
-                    if actual_n_clients == requested_n_clients
-                    else f'请求客户端数为 {requested_n_clients}，实际参与训练的客户端数为 {actual_n_clients}；'
-                         '部分客户端因划分后训练/验证/测试样本为空被自动跳过。'
+                    f'{args.dataset} 按域划分，客户端数量固定为 {actual_n_clients}，'
+                    '前端设置的 n_clients 和 non_iid_alpha 不参与实际切分。'
+                    if uses_domain_split
+                    else (
+                        f'实际参与训练的客户端数量为 {actual_n_clients}。'
+                        if actual_n_clients == frontend_requested_n_clients
+                        else f'请求客户端数为 {frontend_requested_n_clients}，实际参与训练的客户端数为 {actual_n_clients}；'
+                             '部分客户端因划分后训练/验证/测试样本为空被自动跳过。'
+                    )
                 )
             }
             yield f"data: {json.dumps(config_data)}\n\n"
@@ -393,8 +400,9 @@ def run_model():
                 'dataset': args.dataset,
                 'non_iid_alpha': args.non_iid_alpha,
                 'lr': args.lr,
-                'requested_n_clients': int(requested_n_clients),
+                'requested_n_clients': int(frontend_requested_n_clients),
                 'actual_n_clients': int(actual_n_clients),
+                'uses_domain_split': uses_domain_split,
                 'test_accuracies': test_accs,
                 'average_accuracy': mean_acc,
                 'accuracy_curve': accuracy_curve,

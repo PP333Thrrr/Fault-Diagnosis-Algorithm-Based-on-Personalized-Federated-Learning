@@ -17,7 +17,17 @@ def check_cancel(args):
         raise TrainingCancelled()
 
 
+def ensure_non_empty_loader(data_loader, loader_name):
+    if len(data_loader) == 0:
+        raise RuntimeError(
+            f'{loader_name} is empty after batching. '
+            'This usually means the client has fewer than 2 training samples '
+            'or fewer samples than the configured batch size with drop_last enabled.'
+        )
+
+
 def train(model, data_loader, optimizer, loss_fun, device, args=None):
+    ensure_non_empty_loader(data_loader, 'Training DataLoader')
     model.train()
     loss_all = 0
     total = 0
@@ -41,6 +51,7 @@ def train(model, data_loader, optimizer, loss_fun, device, args=None):
 
 
 def test(model, data_loader, loss_fun, device):
+    ensure_non_empty_loader(data_loader, 'Evaluation DataLoader')
     model.eval()
     loss_all = 0
     total = 0
@@ -76,10 +87,15 @@ def test(model, data_loader, loss_fun, device):
 
 
 def train_prox(args, model, server_model, data_loader, optimizer, loss_fun, device):
+    ensure_non_empty_loader(data_loader, 'FedProx training DataLoader')
     model.train()
     loss_all = 0
     total = 0
     correct = 0
+    reference_params = [
+        parameter.detach().clone().to(device)
+        for parameter in server_model.parameters()
+    ]
     for data, target in data_loader:
         check_cancel(args)
         data = data.to(device).float()
@@ -87,8 +103,8 @@ def train_prox(args, model, server_model, data_loader, optimizer, loss_fun, devi
         output = model(data)
         loss = loss_fun(output, target)
         w_diff = torch.tensor(0., device=device)
-        for w, w_t in zip(server_model.parameters(), model.parameters()):
-            w_diff += torch.sum((w_t - w) ** 2)
+        for reference_param, model_param in zip(reference_params, model.parameters()):
+            w_diff += torch.sum((model_param - reference_param) ** 2)
         loss += args.mu / 2. * w_diff
 
         optimizer.zero_grad()
@@ -105,6 +121,7 @@ def train_prox(args, model, server_model, data_loader, optimizer, loss_fun, devi
 
 def trainwithteacher(model, data_loader, optimizer, loss_fun, device, tmodel, lam, args, flag):
     check_cancel(args)
+    ensure_non_empty_loader(data_loader, 'Teacher-guided training DataLoader')
     model.train()
     if tmodel:
         tmodel.eval()
@@ -138,8 +155,14 @@ def pretrain_model(args, model, filename, device='cuda'):
     print('===training pretrained model===')
     data = get_whole_dataset(args.dataset)(args)
     predata = define_pretrain_dataset(args, data)
+    effective_batch_size = min(args.batch, len(predata))
+    if effective_batch_size < 2:
+        raise RuntimeError(
+            'Pretraining dataset is too small for BatchNorm-safe training. '
+            'At least 2 samples are required in the pretraining split.'
+        )
     traindata = torch.utils.data.DataLoader(
-        predata, batch_size=args.batch, shuffle=True)
+        predata, batch_size=effective_batch_size, shuffle=True, drop_last=True)
     loss_fun = nn.CrossEntropyLoss()
     opt = optim.SGD(params=model.parameters(), lr=args.lr)
     for _ in range(args.pretrained_iters):
