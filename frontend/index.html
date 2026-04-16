@@ -81,6 +81,40 @@
             color: #6c757d;
             font-size: 0.95rem;
         }
+        .partition-card {
+            display: none;
+        }
+        .partition-card .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .partition-card .card-header h5 {
+            margin-bottom: 0;
+        }
+        .partition-card.is-collapsed .card-body {
+            display: none;
+        }
+        .partition-toggle {
+            padding: 0.15rem 0.55rem;
+            font-size: 0.85rem;
+            line-height: 1.4;
+        }
+        .partition-table {
+            font-size: 0.92rem;
+        }
+        .common-param-grid .form-group {
+            height: 100%;
+        }
+        .partition-card .card-body {
+            padding: 12px 16px;
+        }
+        .partition-table th,
+        .partition-table td {
+            padding: 0.35rem 0.5rem;
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
@@ -93,8 +127,8 @@
             </div>
             <div class="card-body">
                 <form id="modelForm">
-                    <div class="row">
-                        <div class="col-md-6">
+                    <div class="row common-param-grid">
+                        <div class="col-md-6 col-lg-4">
                             <div class="form-group">
                                 <label for="algorithm">算法选择</label>
                                 <select class="form-control" id="algorithm" name="algorithm">
@@ -106,7 +140,9 @@
                                     <option value="base">Base</option>
                                 </select>
                             </div>
-                            
+                        </div>
+
+                        <div class="col-md-6 col-lg-4">
                             <div class="form-group">
                                 <label for="dataset">数据集选择</label>
                                 <select class="form-control" id="dataset" name="dataset">
@@ -121,35 +157,45 @@
                                 </select>
                                 <small class="form-text text-muted" id="datasetParamHint"></small>
                             </div>
-                            
+                        </div>
+
+                        <div class="col-md-6 col-lg-4">
                             <div class="form-group">
                                 <label for="non_iid_alpha">非独立同分布程度 (alpha)</label>
                                 <input type="number" class="form-control" id="non_iid_alpha" name="non_iid_alpha" value="0.1" step="0.01">
                             </div>
                         </div>
-                        
-                        <div class="col-md-6">
+
+                        <div class="col-md-6 col-lg-4">
                             <div class="form-group">
                                 <label for="iters">通信轮数</label>
                                 <input type="number" class="form-control" id="iters" name="iters" value="300" min="1">
                             </div>
-                            
+                        </div>
+
+                        <div class="col-md-6 col-lg-4">
                             <div class="form-group">
                                 <label for="wk_iters">本地训练轮数</label>
                                 <input type="number" class="form-control" id="wk_iters" name="wk_iters" value="1" min="1">
                             </div>
+                        </div>
 
+                        <div class="col-md-6 col-lg-4">
                             <div class="form-group">
                                 <label for="eval_every">评估频率</label>
                                 <input type="number" class="form-control" id="eval_every" name="eval_every" value="1" min="1">
                                 <small class="form-text text-muted">每 N 轮通信做一次全量评估；设为 5 或 10 可明显提速。</small>
                             </div>
-                            
+                        </div>
+
+                        <div class="col-md-6 col-lg-4">
                             <div class="form-group">
                                 <label for="n_clients">客户端数量</label>
                                 <input type="number" class="form-control" id="n_clients" name="n_clients" value="20" min="1">
                             </div>
+                        </div>
 
+                        <div class="col-md-6 col-lg-4">
                             <div class="form-group">
                                 <label for="display_lr">当前算法学习率 (lr)</label>
                                 <input type="text" class="form-control" id="display_lr" value="0.01" readonly>
@@ -192,6 +238,33 @@
             <p class="mt-2" id="progressText">训练进度: 0% (第 0/300 轮)</p>
             <p class="status-note" id="clientCountNote"></p>
             <button type="button" class="btn btn-danger mt-2" id="cancelTraining" style="display: none;">取消训练</button>
+        </div>
+
+        <div class="card partition-card is-collapsed" id="clientPartitionCard">
+            <div class="card-header">
+                <h5>客户端数据划分诊断</h5>
+                <button type="button" class="btn btn-outline-secondary btn-sm partition-toggle" id="togglePartitionCard">展开</button>
+            </div>
+            <div class="card-body">
+                <p class="status-note" id="clientPartitionSummary"></p>
+                <div class="table-responsive">
+                    <table class="table table-sm table-striped table-hover partition-table">
+                        <thead>
+                            <tr>
+                                <th>客户端</th>
+                                <th>Train</th>
+                                <th>每轮步数</th>
+                                <th>每 epoch 丢弃</th>
+                            </tr>
+                        </thead>
+                        <tbody id="clientPartitionBody">
+                            <tr>
+                                <td colspan="4" class="text-center text-muted">等待训练开始...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
         
         <div class="card result-card" id="resultCard" style="display: none;">
@@ -273,6 +346,7 @@
         let activeJobId = null;
         let trainingRunning = false;
         let liveAccuracyCurve = [];
+        let latestClientPartitionInfo = [];
 
         const clientCurveColors = [
             '#007bff', '#28a745', '#dc3545', '#ffc107', '#17a2b8',
@@ -479,6 +553,45 @@
             closeTrainingStream();
         }
 
+        function resetClientPartitionTable() {
+            latestClientPartitionInfo = [];
+            const card = document.getElementById('clientPartitionCard');
+            card.style.display = 'none';
+            card.classList.add('is-collapsed');
+            document.getElementById('togglePartitionCard').textContent = '展开';
+            document.getElementById('clientPartitionSummary').textContent = '';
+            document.getElementById('clientPartitionBody').innerHTML = `
+                <tr>
+                    <td colspan="4" class="text-center text-muted">等待训练开始...</td>
+                </tr>
+            `;
+        }
+
+        function renderClientPartitionTable(clientPartitionInfo, summaryText = '') {
+            latestClientPartitionInfo = clientPartitionInfo || [];
+            const card = document.getElementById('clientPartitionCard');
+            const summary = document.getElementById('clientPartitionSummary');
+            const body = document.getElementById('clientPartitionBody');
+
+            if (!latestClientPartitionInfo.length) {
+                resetClientPartitionTable();
+                return;
+            }
+
+            card.style.display = 'block';
+            card.classList.add('is-collapsed');
+            document.getElementById('togglePartitionCard').textContent = '展开';
+            summary.textContent = summaryText || '以下为每个客户端的训练样本、每轮步数和样本丢弃量。';
+            body.innerHTML = latestClientPartitionInfo.map(item => `
+                <tr>
+                    <td>Client ${item.client_id + 1}</td>
+                    <td>${item.train_size}</td>
+                    <td>${item.steps_per_round}</td>
+                    <td>${item.samples_dropped_per_epoch}</td>
+                </tr>
+            `).join('');
+        }
+
         function handleTrainingEvent(data) {
             if (data.type === 'progress') {
                 document.getElementById('progressBar').style.width = data.progress + '%';
@@ -486,6 +599,10 @@
                 document.getElementById('progressText').textContent = data.message;
             } else if (data.type === 'training_config') {
                 document.getElementById('clientCountNote').textContent = data.message || '';
+                renderClientPartitionTable(
+                    data.client_partition_info,
+                    '仅保留训练样本、每轮步数和样本丢弃量，便于快速判断划分是否合理。'
+                );
             } else if (data.type === 'round_metrics') {
                 liveAccuracyCurve.push({
                     round: data.round,
@@ -601,6 +718,16 @@
                 alert('错误: ' + data.error);
             }
         }
+
+        document.getElementById('togglePartitionCard').addEventListener('click', function() {
+            const card = document.getElementById('clientPartitionCard');
+            if (card.style.display === 'none') {
+                return;
+            }
+
+            const collapsed = card.classList.toggle('is-collapsed');
+            this.textContent = collapsed ? '展开' : '收起';
+        });
         
         // 运行模型按钮点击事件
         document.getElementById('runModel').addEventListener('click', function() {
@@ -614,6 +741,7 @@
             setTrainingState(true);
             liveAccuracyCurve = [];
             document.getElementById('clientCountNote').textContent = '';
+            resetClientPartitionTable();
             closeTrainingStream();
             
             // 重置进度条

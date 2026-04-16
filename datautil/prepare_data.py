@@ -132,6 +132,23 @@ class TensorZScoreTransform(object):
         return (tensor - self.mean) / self.std
 
 
+def format_time_series_tensor(data):
+    tensor = torch.as_tensor(data, dtype=torch.float32)
+    if tensor.ndim == 2:
+        return tensor.unsqueeze(1).unsqueeze(2)
+    if tensor.ndim == 3:
+        if tensor.shape[1] == 1:
+            return tensor.unsqueeze(2)
+        if tensor.shape[2] == 1:
+            return tensor.transpose(1, 2).unsqueeze(2)
+        return tensor.unsqueeze(1)
+    if tensor.ndim == 4:
+        return tensor
+    raise ValueError(
+        f'Expected time-series samples with 2D, 3D, or 4D shape, got {tuple(tensor.shape)}.'
+    )
+
+
 def build_train_dataloader(dataset, batch_size):
     dataset_size = len(dataset)
     if dataset_size < 2:
@@ -164,7 +181,7 @@ def compute_partition_channel_stats(partition, eps=1e-6):
     mean = samples.mean(dim=reduce_dims, keepdim=True)
     std = samples.std(dim=reduce_dims, keepdim=True, unbiased=False)
     std = torch.where(std < eps, torch.ones_like(std), std)
-    return mean, std
+    return mean.squeeze(0), std.squeeze(0)
 
 
 def wrap_client_partitions_with_train_stats(train_partition, val_partition, test_partition):
@@ -235,9 +252,7 @@ class CWRUDataset(Dataset):
         raw_targets = np.load(filename+'y.npy')
         self.targets, self.target_mapping = remap_targets_to_contiguous(raw_targets)
         self.transform = transform
-        self.data = torch.Tensor(self.data)
-        self.data = torch.unsqueeze(self.data, dim=1)  # 添加通道维度
-        self.data = torch.unsqueeze(self.data, dim=2)  # 添加高度维度，形状变为 (batch, channel, height, width) = (batch, 1, 1, 1024)
+        self.data = format_time_series_tensor(self.data)
 
     def __len__(self):
         self.filelength = len(self.targets)
@@ -254,9 +269,7 @@ class SEUDataset(Dataset):
         raw_targets = np.load(filename+'y.npy')
         self.targets, self.target_mapping = remap_targets_to_contiguous(raw_targets)
         self.transform = transform
-        self.data = torch.Tensor(self.data)
-        self.data = torch.unsqueeze(self.data, dim=1)  # 添加通道维度
-        self.data = torch.unsqueeze(self.data, dim=2)  # 添加高度维度，形状变为 (batch, channel, height, width) = (batch, 1, 1, 1024)
+        self.data = format_time_series_tensor(self.data)
 
     def __len__(self):
         self.filelength = len(self.targets)

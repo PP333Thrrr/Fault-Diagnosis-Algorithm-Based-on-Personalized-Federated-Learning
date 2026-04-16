@@ -21,7 +21,12 @@ MAX_HISTORY = 20
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datautil.prepare_data import get_data
-from util.config import img_param_init, normalize_dataset_name, set_random_seed
+from util.config import (
+    get_recommended_batch_size,
+    img_param_init,
+    normalize_dataset_name,
+    set_random_seed,
+)
 from util.traineval import TrainingCancelled
 from alg import algs
 from alg.algs import ALGORITHMS
@@ -104,6 +109,44 @@ def emit_accuracy_curve_point(algclass, test_loaders, round_index, accuracy_curv
 
 def should_run_evaluation(round_index, total_rounds, eval_every):
     return (round_index % eval_every == 0) or (round_index == total_rounds - 1)
+
+
+def build_client_partition_diagnostics(train_loaders, val_loaders, test_loaders, wk_iters):
+    diagnostics = []
+    for client_idx, (train_loader, val_loader, test_loader) in enumerate(
+        zip(train_loaders, val_loaders, test_loaders)
+    ):
+        train_size = len(train_loader.dataset)
+        val_size = len(val_loader.dataset)
+        test_size = len(test_loader.dataset)
+        effective_batch = getattr(train_loader, 'batch_size', None) or train_size
+        steps_per_epoch = len(train_loader)
+        diagnostics.append({
+            'client_id': int(client_idx),
+            'train_size': int(train_size),
+            'val_size': int(val_size),
+            'test_size': int(test_size),
+            'effective_batch': int(effective_batch),
+            'steps_per_round': int(steps_per_epoch * max(1, wk_iters)),
+            'steps_per_epoch': int(steps_per_epoch),
+            'samples_dropped_per_epoch': int(max(0, train_size - steps_per_epoch * effective_batch)),
+        })
+    return diagnostics
+
+
+def log_client_partition_diagnostics(dataset_name, diagnostics):
+    print(f'[{dataset_name}] Client partition diagnostics:')
+    for item in diagnostics:
+        print(
+            ' '
+            f"Client-{item['client_id']:02d} | "
+            f"train={item['train_size']} | "
+            f"val={item['val_size']} | "
+            f"test={item['test_size']} | "
+            f"effective_batch={item['effective_batch']} | "
+            f"steps/round={item['steps_per_round']} | "
+            f"dropped/epoch={item['samples_dropped_per_epoch']}"
+        )
 
 
 def emit_training_event(event_queue, data):
@@ -220,7 +263,6 @@ def run_training_job(data, job_id, event_queue, cancel_event):
         args.root_dir = data.get('root_dir', '../data/')
         args.save_path = data.get('save_path', '../cks/')
         args.device = data.get('device', 'cuda' if os.environ.get('CUDA_VISIBLE_DEVICES') else 'cpu')
-        args.batch = data.get('batch', 32)
         args.lr = data.get('lr')
         if args.lr is None:
             default_lrs = {
@@ -249,6 +291,8 @@ def run_training_job(data, job_id, event_queue, cancel_event):
 
         # 设置随机种子
         args.dataset = normalize_dataset_name(args.dataset)
+        recommended_batch = int(get_recommended_batch_size(args.dataset))
+        args.batch = recommended_batch
         args.random_state = np.random.RandomState(1)
         set_random_seed(args.seed)
 
@@ -282,6 +326,13 @@ def run_training_job(data, job_id, event_queue, cancel_event):
         actual_n_clients = len(train_loaders)
         args.n_clients = actual_n_clients
         args.cancel_checker = cancel_event.is_set
+        client_partition_info = build_client_partition_diagnostics(
+            train_loaders,
+            val_loaders,
+            test_loaders,
+            args.wk_iters,
+        )
+        log_client_partition_diagnostics(args.dataset, client_partition_info)
 
         config_data = {
             'type': 'training_config',
@@ -291,6 +342,7 @@ def run_training_job(data, job_id, event_queue, cancel_event):
             'eval_every': int(args.eval_every),
             'client_count_adjusted': bool(actual_n_clients != frontend_requested_n_clients),
             'uses_domain_split': uses_domain_split,
+            'client_partition_info': client_partition_info,
             'message': (
                 f'{args.dataset} 按域划分，客户端数量固定为 {actual_n_clients}，'
                 '前端设置的 n_clients 和 non_iid_alpha 不参与实际切分。'

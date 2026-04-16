@@ -6,7 +6,6 @@ import torchvision.datasets as datasets
 from PIL import ImageFile
 import numpy as np
 from PIL import Image
-import torchvision.transforms as transforms
 import torch
 import sys
 import os
@@ -20,7 +19,7 @@ class ImageTextData(object):
 
     def __init__(self, dataset, root, preprocess, prompt='a picture of a'):
         dataset = os.path.join(root, dataset)
-        data = datasets.ImageFolder(dataset, transform=self._TRANSFORM)
+        data = datasets.ImageFolder(dataset)
         labels = data.classes
         self.data = data
         self.labels = labels
@@ -31,9 +30,10 @@ class ImageTextData(object):
         self.text = clip.tokenize(self.labels)
 
     def __getitem__(self, index):
-        image, label = self.data.imgs[index]
+        image_path, label = self.data.imgs[index]
+        image = Image.open(image_path).convert('RGB')
         if self.preprocess is not None:
-            image = self.preprocess(Image.open(image))
+            image = self.preprocess(image)
         text_enc = self.text[label]
         return image, text_enc, label
 
@@ -45,16 +45,6 @@ class ImageTextData(object):
         name = ImageTextData._DATA_FOLDER[index]
         name = name.replace('/', '_')
         return name
-
-    _TRANSFORM = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
-    ])
 
 
 def get_data(data_name):

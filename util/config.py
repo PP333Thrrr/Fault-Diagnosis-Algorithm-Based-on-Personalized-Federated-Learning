@@ -13,9 +13,28 @@ DATASET_ALIASES = {
     'office-caltech': 'office-caltech',
 }
 
+RECOMMENDED_BATCH_BY_DATASET = {
+    'cwru': 8,
+    'seu': 8,
+    'medmnist': 8,
+    'medmnistA': 8,
+    'medmnistC': 8,
+    'pamap': 8,
+    'covid': 8,
+    'pacs': 32,
+    'vlcs': 16,
+    'officehome': 32,
+    'office-caltech': 32,
+}
+
 
 def normalize_dataset_name(dataset_name):
     return DATASET_ALIASES.get(dataset_name, dataset_name)
+
+
+def get_recommended_batch_size(dataset_name, fallback=16):
+    dataset_name = normalize_dataset_name(dataset_name)
+    return RECOMMENDED_BATCH_BY_DATASET.get(dataset_name, fallback)
 
 
 def img_param_init(args):
