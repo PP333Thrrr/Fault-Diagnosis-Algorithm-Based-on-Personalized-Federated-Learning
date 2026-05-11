@@ -76,6 +76,12 @@
             font-weight: 600;
             color: #007bff;
         }
+        .chart-status {
+            margin-top: 8px;
+            color: #6c757d;
+            font-size: 0.9rem;
+            min-height: 1.2rem;
+        }
         .status-note {
             margin-top: 10px;
             color: #6c757d;
@@ -114,6 +120,57 @@
         .partition-table td {
             padding: 0.35rem 0.5rem;
             white-space: nowrap;
+            vertical-align: top;
+        }
+        .partition-table td.label-distribution-cell {
+            white-space: normal;
+            min-width: 260px;
+            max-width: 380px;
+            line-height: 1.45;
+        }
+        .label-distribution-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 10px;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .label-summary-stat {
+            font-size: 0.86rem;
+            color: #495057;
+        }
+        .label-dominance-bar {
+            width: 100%;
+            height: 6px;
+            margin: 4px 0 8px;
+            background: #e9ecef;
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .label-dominance-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #17a2b8 0%, #007bff 100%);
+            border-radius: 999px;
+        }
+        .label-chip-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .label-chip {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.1rem 0.45rem;
+            border-radius: 999px;
+            background: #eef3ff;
+            color: #2f5aa8;
+            font-size: 0.83rem;
+            border: 1px solid #d6e3ff;
+        }
+        .label-chip-more {
+            background: #f1f3f5;
+            color: #6c757d;
+            border-color: #dee2e6;
         }
     </style>
 </head>
@@ -253,13 +310,14 @@
                             <tr>
                                 <th>客户端</th>
                                 <th>Train</th>
+                                <th>标签分布</th>
                                 <th>每轮步数</th>
                                 <th>每 epoch 丢弃</th>
                             </tr>
                         </thead>
                         <tbody id="clientPartitionBody">
                             <tr>
-                                <td colspan="4" class="text-center text-muted">等待训练开始...</td>
+                                <td colspan="5" class="text-center text-muted">等待训练开始...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -277,8 +335,12 @@
                         <h6>基本信息</h6>
                         <p><strong>算法:</strong> <span id="resultAlgorithm"></span></p>
                         <p><strong>数据集:</strong> <span id="resultDataset"></span></p>
+                        <p><strong>客户端数量:</strong> <span id="resultClientCount"></span></p>
+                        <p><strong>通信轮数:</strong> <span id="resultIters"></span></p>
+                        <p><strong>本地训练轮数:</strong> <span id="resultWkIters"></span></p>
                         <p><strong>非独立同分布程度:</strong> <span id="resultAlpha"></span></p>
                         <p><strong>学习率:</strong> <span id="resultLearningRate"></span></p>
+                        <p><strong>算法参数:</strong> <span id="resultAlgorithmParams"></span></p>
                         <p><strong>评估频率:</strong> <span id="resultEvalEvery"></span></p>
                         <p><strong>平均准确率:</strong> <span id="resultAverageAcc"></span></p>
                         <p><strong>训练时长:</strong> <span id="resultTrainingTime"></span></p>
@@ -295,12 +357,14 @@
                     <div class="chart-container" style="height: 250px;">
                         <canvas id="accuracyChart"></canvas>
                     </div>
+                    <div class="chart-status" id="accuracyChartStatus"></div>
                 </div>
                 <div class="mt-4">
                     <h6>各客户端准确率-通信轮次曲线</h6>
                     <div class="chart-container" style="height: 320px;">
                         <canvas id="accuracyCurveChart"></canvas>
                     </div>
+                    <div class="chart-status" id="accuracyCurveStatus"></div>
                 </div>
             </div>
         </div>
@@ -362,12 +426,20 @@
         }
 
         function renderAccuracyCurveChart(accuracyCurve) {
+            const status = document.getElementById('accuracyCurveStatus');
+            status.textContent = '';
+            if (typeof Chart === 'undefined') {
+                status.textContent = '图表库未加载，无法绘制通信轮次曲线。';
+                return;
+            }
+
             const ctx = document.getElementById('accuracyCurveChart').getContext('2d');
             if (window.accuracyCurveChart && typeof window.accuracyCurveChart.destroy === 'function') {
                 window.accuracyCurveChart.destroy();
             }
 
             if (!accuracyCurve || accuracyCurve.length === 0) {
+                status.textContent = '暂无轮次准确率数据。';
                 window.accuracyCurveChart = new Chart(ctx, {
                     type: 'line',
                     data: {
@@ -389,15 +461,28 @@
                 return;
             }
 
-            const labels = accuracyCurve.map(point => `Round ${point.round}`);
-            const clientCount = Math.max(...accuracyCurve.map(point => point.client_accuracies.length));
+            const normalizedCurve = accuracyCurve
+                .filter(point => point && Array.isArray(point.client_accuracies))
+                .map(point => ({
+                    round: point.round,
+                    client_accuracies: point.client_accuracies.filter(value => typeof value === 'number' && Number.isFinite(value)),
+                    average_accuracy: point.average_accuracy
+                }));
+
+            if (!normalizedCurve.length) {
+                status.textContent = '轮次准确率数据格式无效，无法绘图。';
+                return;
+            }
+
+            const labels = normalizedCurve.map(point => `Round ${point.round}`);
+            const clientCount = Math.max(...normalizedCurve.map(point => point.client_accuracies.length), 0);
             const datasets = [];
 
             for (let clientIndex = 0; clientIndex < clientCount; clientIndex++) {
                 const color = clientCurveColors[clientIndex % clientCurveColors.length];
                 datasets.push({
                     label: `客户端 ${clientIndex + 1}`,
-                    data: accuracyCurve.map(point => {
+                    data: normalizedCurve.map(point => {
                         const value = point.client_accuracies[clientIndex];
                         return typeof value === 'number' ? value * 100 : null;
                     }),
@@ -412,7 +497,11 @@
 
             datasets.push({
                 label: '平均准确率',
-                data: accuracyCurve.map(point => point.average_accuracy * 100),
+                data: normalizedCurve.map(point =>
+                    (typeof point.average_accuracy === 'number' && Number.isFinite(point.average_accuracy))
+                        ? point.average_accuracy * 100
+                        : null
+                ),
                 borderColor: '#343a40',
                 backgroundColor: '#343a40',
                 borderWidth: 3,
@@ -468,13 +557,35 @@
             });
         }
 
+        function getResultAlgorithmParams(data) {
+            const params = [];
+            if (typeof data.lr === 'number') {
+                params.push(`lr: ${data.lr}`);
+            }
+            if (data.algorithm === 'fedprox' && typeof data.mu === 'number') {
+                params.push(`mu: ${data.mu}`);
+            }
+            if (data.algorithm === 'fedap' && typeof data.model_momentum === 'number') {
+                params.push(`momentum: ${data.model_momentum}`);
+            }
+            if (data.algorithm === 'metafed') {
+                if (typeof data.threshold === 'number') {
+                    params.push(`threshold: ${data.threshold}`);
+                }
+                if (typeof data.lam === 'number') {
+                    params.push(`lam: ${data.lam}`);
+                }
+            }
+            return params.join(', ') || '无';
+        }
+
         const defaultLearningRates = {
             base: 0.01,
             fedavg: 0.01,
-            fedprox: 0.005,
+            fedprox: 0.01,
             fedbn: 0.01,
             fedap: 0.005,
-            metafed: 0.001
+            metafed: 0.01
         };
         const domainSplitDatasets = new Set(['pacs', 'vlcs', 'officehome']);
         let manualNClientsValue = document.getElementById('n_clients').value;
@@ -562,7 +673,7 @@
             document.getElementById('clientPartitionSummary').textContent = '';
             document.getElementById('clientPartitionBody').innerHTML = `
                 <tr>
-                    <td colspan="4" class="text-center text-muted">等待训练开始...</td>
+                    <td colspan="5" class="text-center text-muted">等待训练开始...</td>
                 </tr>
             `;
         }
@@ -581,15 +692,72 @@
             card.style.display = 'block';
             card.classList.add('is-collapsed');
             document.getElementById('togglePartitionCard').textContent = '展开';
-            summary.textContent = summaryText || '以下为每个客户端的训练样本、每轮步数和样本丢弃量。';
+            summary.textContent = summaryText || '标签分布列展示训练集覆盖了多少类、主类占比，以及样本数最多的几个标签。';
             body.innerHTML = latestClientPartitionInfo.map(item => `
                 <tr>
                     <td>Client ${item.client_id + 1}</td>
                     <td>${item.train_size}</td>
+                    <td class="label-distribution-cell">${renderLabelDistributionCell(item)}</td>
                     <td>${item.steps_per_round}</td>
                     <td>${item.samples_dropped_per_epoch}</td>
                 </tr>
             `).join('');
+        }
+
+        function escapeHtml(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function renderLabelDistributionCell(item) {
+            const classDistribution = item.train_class_distribution || {};
+            const entries = Object.entries(classDistribution)
+                .map(([label, count]) => ({
+                    label,
+                    count: Number(count) || 0
+                }))
+                .sort((left, right) => {
+                    if (right.count !== left.count) {
+                        return right.count - left.count;
+                    }
+                    return Number(left.label) - Number(right.label);
+                });
+
+            const dominantRatio = Math.max(0, Math.min(100, ((item.train_dominant_ratio || 0) * 100)));
+            const dominantLabel = item.train_dominant_label ?? '-';
+            const topEntries = entries.slice(0, 4);
+            const remainingCount = Math.max(0, entries.length - topEntries.length);
+            const tooltip = entries.length
+                ? entries.map(entry => `标签 ${entry.label}: ${entry.count}`).join(' | ')
+                : '无标签数据';
+
+            const chips = topEntries.map(entry =>
+                `<span class="label-chip">标签 ${escapeHtml(entry.label)}：${entry.count}</span>`
+            );
+            if (remainingCount > 0) {
+                chips.push(`<span class="label-chip label-chip-more">其余 ${remainingCount} 类</span>`);
+            }
+            if (!chips.length) {
+                chips.push('<span class="text-muted">无标签数据</span>');
+            }
+
+            return `
+                <div title="${escapeHtml(tooltip)}">
+                    <div class="label-distribution-summary">
+                        <span class="label-summary-stat">${item.train_num_classes || 0} 类</span>
+                        <span class="label-summary-stat">主类：标签 ${escapeHtml(dominantLabel)}</span>
+                        <span class="label-summary-stat">占比：${dominantRatio.toFixed(1)}%</span>
+                    </div>
+                    <div class="label-dominance-bar">
+                        <div class="label-dominance-fill" style="width: ${dominantRatio.toFixed(1)}%"></div>
+                    </div>
+                    <div class="label-chip-list">${chips.join('')}</div>
+                </div>
+            `;
         }
 
         function handleTrainingEvent(data) {
@@ -601,7 +769,7 @@
                 document.getElementById('clientCountNote').textContent = data.message || '';
                 renderClientPartitionTable(
                     data.client_partition_info,
-                    '仅保留训练样本、每轮步数和样本丢弃量，便于快速判断划分是否合理。'
+                    '展示每个客户端的训练样本量、标签分布摘要、每轮步数和样本丢弃量，便于判断异构划分是否合理。'
                 );
             } else if (data.type === 'round_metrics') {
                 liveAccuracyCurve.push({
@@ -612,13 +780,27 @@
             } else if (data.type === 'result') {
                 finishTrainingUI();
 
+                const testAccuracies = Array.isArray(data.test_accuracies)
+                    ? data.test_accuracies.filter(value => typeof value === 'number' && Number.isFinite(value))
+                    : [];
+
                 document.getElementById('resultCard').style.display = 'block';
                 document.getElementById('resultAlgorithm').textContent = data.algorithm;
                 document.getElementById('resultDataset').textContent = data.dataset;
+                document.getElementById('resultClientCount').textContent =
+                    typeof data.actual_n_clients === 'number'
+                        ? `${data.actual_n_clients}` + (data.requested_n_clients !== data.actual_n_clients ? `（请求 ${data.requested_n_clients}）` : '')
+                        : '-';
+                document.getElementById('resultIters').textContent = typeof data.iters === 'number' ? data.iters : '-';
+                document.getElementById('resultWkIters').textContent = typeof data.wk_iters === 'number' ? data.wk_iters : '-';
                 document.getElementById('resultAlpha').textContent = data.non_iid_alpha;
                 document.getElementById('resultLearningRate').textContent = data.lr;
+                document.getElementById('resultAlgorithmParams').textContent = getResultAlgorithmParams(data);
                 document.getElementById('resultEvalEvery').textContent = `每 ${data.eval_every || 1} 轮`;
-                document.getElementById('resultAverageAcc').textContent = (data.average_accuracy * 100).toFixed(2) + '%';
+                document.getElementById('resultAverageAcc').textContent =
+                    (typeof data.average_accuracy === 'number' && Number.isFinite(data.average_accuracy))
+                        ? (data.average_accuracy * 100).toFixed(2) + '%'
+                        : '-';
                 document.getElementById('resultTrainingTime').textContent = data.training_time;
                 if (typeof data.actual_n_clients === 'number') {
                     document.getElementById('clientCountNote').textContent =
@@ -628,87 +810,119 @@
                             : '');
                 }
 
-                const ctx = document.getElementById('accuracyChart').getContext('2d');
-                if (window.accuracyChart && typeof window.accuracyChart.destroy === 'function') {
-                    window.accuracyChart.destroy();
-                }
+                const accuracyChartStatus = document.getElementById('accuracyChartStatus');
+                accuracyChartStatus.textContent = '';
+                if (typeof Chart === 'undefined') {
+                    accuracyChartStatus.textContent = '图表库未加载，无法绘制准确率分布图。';
+                } else if (!testAccuracies.length) {
+                    accuracyChartStatus.textContent = '暂无客户端准确率数据。';
+                    if (window.accuracyChart && typeof window.accuracyChart.destroy === 'function') {
+                        window.accuracyChart.destroy();
+                    }
+                } else {
+                    const ctx = document.getElementById('accuracyChart').getContext('2d');
+                    if (window.accuracyChart && typeof window.accuracyChart.destroy === 'function') {
+                        window.accuracyChart.destroy();
+                    }
 
-                const chartOptions = {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            display: false
+                    const chartOptions = {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        return `准确率: ${context.parsed.y.toFixed(2)}%`;
+                                    }
+                                }
+                            }
                         },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    return `准确率: ${context.parsed.y.toFixed(2)}%`;
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                max: 100,
+                                title: {
+                                    display: true,
+                                    text: '准确率 (%)'
+                                },
+                                ticks: {
+                                    maxTicksLimit: 6
+                                }
+                            },
+                            x: {
+                                ticks: {
+                                    maxRotation: 45,
+                                    minRotation: 45,
+                                    maxTicksLimit: 10
                                 }
                             }
                         }
-                    },
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            max: 100,
-                            title: {
-                                display: true,
-                                text: '准确率 (%)'
-                            },
-                            ticks: {
-                                maxTicksLimit: 6
-                            }
-                        },
-                        x: {
-                            ticks: {
-                                maxRotation: 45,
-                                minRotation: 45,
-                                maxTicksLimit: 10
-                            }
+                    };
+
+                    const labels = testAccuracies.map((_, index) => {
+                        if (testAccuracies.length > 10) {
+                            return `Client ${index + 1}`;
                         }
-                    }
-                };
+                        return `客户端 ${index + 1}`;
+                    });
 
-                const labels = data.test_accuracies.map((_, index) => {
-                    if (data.test_accuracies.length > 10) {
-                        return `Client ${index + 1}`;
-                    }
-                    return `客户端 ${index + 1}`;
-                });
-
-                window.accuracyChart = new Chart(ctx, {
-                    type: 'bar',
-                    data: {
-                        labels: labels,
-                        datasets: [{
-                            label: '准确率',
-                            data: data.test_accuracies.map(acc => acc * 100),
-                            backgroundColor: 'rgba(75, 192, 192, 0.6)',
-                            borderColor: 'rgba(75, 192, 192, 1)',
-                            borderWidth: 1
-                        }]
-                    },
-                    options: chartOptions
-                });
+                    window.accuracyChart = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: labels,
+                            datasets: [{
+                                label: '准确率',
+                                data: testAccuracies.map(acc => acc * 100),
+                                backgroundColor: 'rgba(75, 192, 192, 0.6)',
+                                borderColor: 'rgba(75, 192, 192, 1)',
+                                borderWidth: 1
+                            }]
+                        },
+                        options: chartOptions
+                    });
+                }
 
                 renderAccuracyCurveChart(data.accuracy_curve || liveAccuracyCurve);
 
                 const accuracySummary = document.getElementById('accuracySummary');
+                const maxAccuracy = testAccuracies.length ? Math.max(...testAccuracies) : null;
+                const minAccuracy = testAccuracies.length ? Math.min(...testAccuracies) : null;
+                const accuracyStd = testAccuracies.length && typeof data.average_accuracy === 'number'
+                    ? Math.sqrt(testAccuracies.reduce((sum, acc) => sum + Math.pow(acc - data.average_accuracy, 2), 0) / testAccuracies.length)
+                    : null;
                 accuracySummary.innerHTML = `
                     <div class="summary-item">
                         <span class="label">最高准确率:</span>
-                        <span class="value">${(Math.max(...data.test_accuracies) * 100).toFixed(2)}%</span>
+                        <span class="value">${maxAccuracy === null ? '-' : (maxAccuracy * 100).toFixed(2) + '%'}</span>
                     </div>
                     <div class="summary-item">
                         <span class="label">最低准确率:</span>
-                        <span class="value">${(Math.min(...data.test_accuracies) * 100).toFixed(2)}%</span>
+                        <span class="value">${minAccuracy === null ? '-' : (minAccuracy * 100).toFixed(2) + '%'}</span>
                     </div>
                     <div class="summary-item">
                         <span class="label">准确率标准差:</span>
-                        <span class="value">${Math.sqrt(data.test_accuracies.reduce((sum, acc) => sum + Math.pow(acc - data.average_accuracy, 2), 0) / data.test_accuracies.length).toFixed(4)}</span>
+                        <span class="value">${accuracyStd === null ? '-' : accuracyStd.toFixed(4)}</span>
                     </div>
                 `;
+                if (typeof data.precision === 'number' && typeof data.recall === 'number' && typeof data.f1_score === 'number') {
+                    accuracySummary.innerHTML += `
+                        <div class="summary-item">
+                            <span class="label">宏平均 Precision:</span>
+                            <span class="value">${(data.precision * 100).toFixed(2)}%</span>
+                        </div>
+                        <div class="summary-item">
+                            <span class="label">宏平均 Recall:</span>
+                            <span class="value">${(data.recall * 100).toFixed(2)}%</span>
+                        </div>
+                        <div class="summary-item">
+                            <span class="label">宏平均 F1:</span>
+                            <span class="value">${(data.f1_score * 100).toFixed(2)}%</span>
+                        </div>
+                    `;
+                }
                 loadHistory();
             } else if (data.type === 'cancelled') {
                 finishTrainingUI();

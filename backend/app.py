@@ -112,6 +112,60 @@ def should_run_evaluation(round_index, total_rounds, eval_every):
 
 
 def build_client_partition_diagnostics(train_loaders, val_loaders, test_loaders, wk_iters):
+    def extract_targets(dataset):
+        current = dataset
+        visited_ids = set()
+        while current is not None and id(current) not in visited_ids:
+            visited_ids.add(id(current))
+
+            if hasattr(current, 'targets'):
+                targets = getattr(current, 'targets')
+                if targets is not None:
+                    return np.asarray(targets)
+
+            if hasattr(current, 'indices') and hasattr(current, 'data'):
+                base_dataset = getattr(current, 'data')
+                base_targets = getattr(base_dataset, 'targets', None)
+                if base_targets is not None:
+                    indices = np.asarray(getattr(current, 'indices'), dtype=np.int64)
+                    return np.asarray(base_targets)[indices]
+
+            current = getattr(current, 'dataset', None)
+        return np.asarray([])
+
+    def summarize_targets(targets):
+        targets = np.asarray(targets)
+        if targets.size == 0:
+            return {
+                'num_classes': 0,
+                'dominant_label': None,
+                'dominant_ratio': 0.0,
+                'class_distribution': {},
+                'label_summary': '无标签数据',
+            }
+
+        unique_labels, counts = np.unique(targets.astype(np.int64), return_counts=True)
+        distribution = {
+            str(int(label)): int(count)
+            for label, count in zip(unique_labels.tolist(), counts.tolist())
+        }
+        dominant_index = int(np.argmax(counts))
+        dominant_label = int(unique_labels[dominant_index])
+        dominant_ratio = float(counts[dominant_index] / counts.sum())
+        sorted_items = sorted(distribution.items(), key=lambda item: (-item[1], int(item[0])))
+        top_items = sorted_items[:3]
+        summary_parts = [f'{label}:{count}' for label, count in top_items]
+        if len(sorted_items) > 3:
+            summary_parts.append('...')
+
+        return {
+            'num_classes': int(len(unique_labels)),
+            'dominant_label': dominant_label,
+            'dominant_ratio': dominant_ratio,
+            'class_distribution': distribution,
+            'label_summary': ' / '.join(summary_parts),
+        }
+
     diagnostics = []
     for client_idx, (train_loader, val_loader, test_loader) in enumerate(
         zip(train_loaders, val_loaders, test_loaders)
@@ -121,6 +175,7 @@ def build_client_partition_diagnostics(train_loaders, val_loaders, test_loaders,
         test_size = len(test_loader.dataset)
         effective_batch = getattr(train_loader, 'batch_size', None) or train_size
         steps_per_epoch = len(train_loader)
+        train_label_info = summarize_targets(extract_targets(train_loader.dataset))
         diagnostics.append({
             'client_id': int(client_idx),
             'train_size': int(train_size),
@@ -130,6 +185,11 @@ def build_client_partition_diagnostics(train_loaders, val_loaders, test_loaders,
             'steps_per_round': int(steps_per_epoch * max(1, wk_iters)),
             'steps_per_epoch': int(steps_per_epoch),
             'samples_dropped_per_epoch': int(max(0, train_size - steps_per_epoch * effective_batch)),
+            'train_num_classes': int(train_label_info['num_classes']),
+            'train_dominant_label': train_label_info['dominant_label'],
+            'train_dominant_ratio': float(train_label_info['dominant_ratio']),
+            'train_class_distribution': train_label_info['class_distribution'],
+            'train_label_summary': train_label_info['label_summary'],
         })
     return diagnostics
 
@@ -145,7 +205,10 @@ def log_client_partition_diagnostics(dataset_name, diagnostics):
             f"test={item['test_size']} | "
             f"effective_batch={item['effective_batch']} | "
             f"steps/round={item['steps_per_round']} | "
-            f"dropped/epoch={item['samples_dropped_per_epoch']}"
+            f"dropped/epoch={item['samples_dropped_per_epoch']} | "
+            f"classes={item['train_num_classes']} | "
+            f"dominant={item['train_dominant_label']}({item['train_dominant_ratio']:.2%}) | "
+            f"labels={item['train_label_summary']}"
         )
 
 
@@ -268,10 +331,12 @@ def run_training_job(data, job_id, event_queue, cancel_event):
             default_lrs = {
                 'base': 0.01,
                 'fedavg': 0.01,
-                'fedprox': 0.005,
+                # fedprox 推荐值0.005
+                'fedprox': 0.01,
                 'fedbn': 0.01,
                 'fedap': 0.005,
-                'metafed': 0.001
+                # metafed 推荐值 0.001
+                'metafed': 0.01
             }
             args.lr = default_lrs.get(args.alg, 0.01)
         args.n_clients = data.get('n_clients', 20)
@@ -279,6 +344,7 @@ def run_training_job(data, job_id, event_queue, cancel_event):
         args.plan = data.get('plan', 1)
         args.pretrained_iters = data.get('pretrained_iters', 150)
         args.seed = data.get('seed', 0)
+        args.split_seed = data.get('split_seed', 1)
         args.nosharebn = data.get('nosharebn', False)
 
         # 算法特定参数
@@ -293,7 +359,7 @@ def run_training_job(data, job_id, event_queue, cancel_event):
         args.dataset = normalize_dataset_name(args.dataset)
         recommended_batch = int(get_recommended_batch_size(args.dataset))
         args.batch = recommended_batch
-        args.random_state = np.random.RandomState(1)
+        args.random_state = np.random.RandomState(args.split_seed)
         set_random_seed(args.seed)
 
         # 处理图像数据集的特殊参数
@@ -528,7 +594,14 @@ def run_training_job(data, job_id, event_queue, cancel_event):
             'algorithm': args.alg,
             'dataset': args.dataset,
             'non_iid_alpha': args.non_iid_alpha,
+            'partition_data': args.partition_data,
+            'batch': int(args.batch),
+            'seed': int(args.seed),
+            'split_seed': int(args.split_seed),
+            'plan': int(args.plan),
             'lr': args.lr,
+            'iters': int(requested_iters),
+            'wk_iters': int(args.wk_iters),
             'eval_every': int(args.eval_every),
             'requested_n_clients': int(frontend_requested_n_clients),
             'actual_n_clients': int(actual_n_clients),
@@ -537,8 +610,18 @@ def run_training_job(data, job_id, event_queue, cancel_event):
             'average_accuracy': mean_acc,
             'accuracy_curve': accuracy_curve,
             'training_time': training_time_str,
-            'training_duration_seconds': training_duration
+            'training_duration_seconds': training_duration,
+            'precision': mean_precision if is_fault_diagnosis else None,
+            'recall': mean_recall if is_fault_diagnosis else None,
+            'f1_score': mean_f1 if is_fault_diagnosis else None,
         }
+        if args.alg == 'metafed':
+            result_data['threshold'] = args.threshold
+            result_data['lam'] = args.lam
+        elif args.alg == 'fedprox':
+            result_data['mu'] = args.mu
+        elif args.alg == 'fedap':
+            result_data['model_momentum'] = args.model_momentum
         emit_training_event(event_queue, result_data)
 
         # 添加到历史记录
@@ -548,6 +631,12 @@ def run_training_job(data, job_id, event_queue, cancel_event):
             'dataset': args.dataset,
             'non_iid_alpha': args.non_iid_alpha,
             'n_clients': actual_n_clients,
+            'requested_n_clients': int(frontend_requested_n_clients),
+            'partition_data': args.partition_data,
+            'batch': int(args.batch),
+            'seed': int(args.seed),
+            'split_seed': int(args.split_seed),
+            'plan': int(args.plan),
             'iters': requested_iters,
             'wk_iters': args.wk_iters,
             'eval_every': int(args.eval_every),
@@ -561,6 +650,7 @@ def run_training_job(data, job_id, event_queue, cancel_event):
         # 添加算法特定参数
         if args.alg == 'metafed':
             history_record['threshold'] = args.threshold
+            history_record['lam'] = args.lam
         elif args.alg == 'fedprox':
             history_record['mu'] = args.mu
         elif args.alg == 'fedap':

@@ -7,7 +7,12 @@ import torch
 import argparse
 
 from datautil.prepare_data import *
-from util.config import img_param_init, normalize_dataset_name, set_random_seed
+from util.config import (
+    get_recommended_batch_size,
+    img_param_init,
+    normalize_dataset_name,
+    set_random_seed,
+)
 from util.evalandprint import evalandprint
 from alg import algs
 
@@ -25,7 +30,18 @@ if __name__ == '__main__':
                         default='./cks/', help='path to save the checkpoint')
     parser.add_argument('--device', type=str,
                         default='cuda', help='[cuda | cpu]')
-    parser.add_argument('--batch', type=int, default=32, help='batch size')
+    parser.add_argument(
+        '--batch',
+        type=int,
+        default=None,
+        help='batch size (default: recommended per-dataset)',
+    )
+    parser.add_argument(
+        '--split_seed',
+        type=int,
+        default=1,
+        help='random seed used for client data partitioning (Dirichlet / shuffle)',
+    )
     # 通信轮数
     parser.add_argument('--iters', type=int, default=300,
                         help='iterations for communication')
@@ -85,7 +101,10 @@ if __name__ == '__main__':
         print('CUDA is not available, falling back to CPU.')
         args.device = 'cpu'
 
-    args.random_state = np.random.RandomState(1)
+    if args.batch is None:
+        args.batch = int(get_recommended_batch_size(args.dataset))
+
+    args.random_state = np.random.RandomState(args.split_seed)
     set_random_seed(args.seed)
 
     if args.dataset in ['vlcs', 'pacs', 'officehome', 'office-caltech']:

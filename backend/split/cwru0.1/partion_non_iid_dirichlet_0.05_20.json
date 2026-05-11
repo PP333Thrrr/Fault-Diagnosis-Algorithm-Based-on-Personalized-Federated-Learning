@@ -1,7 +1,7 @@
 {
   "dataset": "cwru",
   "datapercent": 0.1,
-  "partition_data": "non_iid_dirichlet",
+  "partition_data": "origin",
   "non_iid_alpha": 0.05,
   "requested_n_clients": 20,
   "clients": [
